@@ -1,0 +1,131 @@
+import QtQml
+
+QtObject {
+  property string language: "en"
+  readonly property var chinese: ({
+    "Untitled clip": "未命名收藏",
+    "Untitled article": "未命名文章",
+    "Settings": "设置",
+    "Close": "关闭",
+    "Hover preview": "悬浮预览",
+    "Show saved content beside Clipper while hovering an entry.": "悬停条目时，在 Clipper 旁预览已保存的内容。",
+    "Preferred preview side": "预览优先显示位置",
+    "Left": "左侧",
+    "Right": "右侧",
+    "Interface language": "界面语言",
+    "Follow system": "跟随系统",
+    "Back to collection": "返回收藏",
+    "Saved article excerpt": "文章内容摘录",
+    "Saved clip excerpt": "收藏内容摘录",
+    "Saved image unavailable · remaining content is still readable": "已保存的图片不可用，其余内容仍可阅读",
+    "Loading draft…": "正在加载草稿…",
+    "Ready": "就绪",
+    "Draft saved": "草稿已保存",
+    "Draft unavailable": "草稿不可用",
+    "Saving draft…": "正在保存草稿…",
+    "Draft not saved": "草稿未保存",
+    "Saved": "已保存",
+    "Save failed": "保存失败",
+    "Content unavailable · Open details": "内容不可用 · 打开详情",
+    "Open to retry": "打开后重试",
+    "Update incomplete · ": "更新不完整 · ",
+    "Incomplete · ": "内容不完整 · ",
+    "Update pending · Open source": "等待更新 · 打开来源",
+    "Capture pending · Open source": "等待捕获 · 打开来源",
+    "Article": "文章",
+    "Mixed clip": "混合收藏",
+    "Loading…": "正在加载…",
+    "No matching clips": "没有匹配的收藏",
+    "Trash is empty": "回收站为空",
+    "Your collection is empty": "暂无收藏",
+    "Trash": "回收站",
+    "Search Trash": "搜索回收站",
+    "Search clips": "搜索收藏",
+    "All": "全部",
+    "Articles": "文章",
+    "Notes": "笔记",
+    "Images": "图片",
+    "New clip": "新建收藏",
+    "Write Markdown, paste text or images…": "编写 Markdown，粘贴文字或图片…",
+    "Saving…": "正在保存…",
+    "Save": "保存",
+    "Empty Trash": "清空回收站",
+    "Permanently empty Trash?": "永久清空回收站？",
+    "This permanently removes every clip in Trash and cannot be undone.": "这将永久删除回收站中的所有收藏，且无法撤销。",
+    "Yes": "确定",
+    "Cancel": "取消",
+    "Could not save this setting.": "无法保存此设置。",
+    "Clipper returned an invalid response.": "Clipper 返回了无效响应。",
+    "Clipper rejected the request.": "Clipper 拒绝了请求。",
+    "Draft changed; reload it before saving": "草稿已更改，请重新加载后再保存",
+    "Draft changed while it was being saved": "保存过程中草稿已更改",
+    "Draft storage is unavailable": "草稿存储不可用",
+    "Clip changed; reload it before saving": "收藏已更改，请重新加载后再保存",
+    "Clip not found": "找不到收藏",
+    "A clip cannot be empty": "收藏内容不能为空",
+    "Could not create the collection directory": "无法创建收藏目录",
+    "Could not create the asset directory": "无法创建附件目录",
+    "Asset exceeds the 12 MiB limit": "附件超过 12 MiB 大小限制",
+    "Asset data is not valid base64 image data": "附件不是有效的 Base64 图片数据",
+    "Could not inspect asset data": "无法读取附件数据",
+    "Asset is not a valid image": "附件不是有效的图片",
+    "Asset image dimensions are unsupported": "不支持此图片尺寸",
+    "Asset image format is unsupported": "不支持此图片格式",
+    "Declared MIME type does not match image data": "声明的 MIME 类型与图片数据不匹配",
+    "Could not store the asset": "无法保存附件",
+    "Only web links can be opened": "只能打开网页链接",
+    "Could not open the source browser": "无法打开来源浏览器",
+    "Could not open the detail window": "无法打开详情窗口",
+    "Image could not be read or exceeds 12 MiB": "无法读取图片，或图片超过 12 MiB",
+    "Could not create a screenshot directory": "无法创建截图目录",
+    "Screenshot was cancelled or produced no image": "截图已取消或未生成图片",
+    "Screenshot could not be read or exceeds 12 MiB": "无法读取截图，或截图超过 12 MiB",
+    "Clipboard does not contain a supported image": "剪贴板中没有支持的图片",
+    "Image does not belong to this clip": "图片不属于此收藏",
+    "Image is missing": "图片已丢失",
+    "Clip is already in Trash": "收藏已在回收站中",
+    "Clip is not in Trash": "收藏不在回收站中",
+    "The operation could not be completed": "无法完成操作",
+    "Readable article": "可阅读文章",
+    "Selected content": "选中内容",
+    "GitHub README": "GitHub README",
+    "GitHub Issue discussion": "GitHub Issue 讨论",
+    "GitHub pull request discussion": "GitHub 拉取请求讨论",
+    "Discuz original post": "Discuz 主帖",
+    "Discuz current-page discussion": "Discuz 当前页讨论",
+    "Discuz visible replies": "Discuz 可见回复",
+    "Discuz thread": "Discuz 主题",
+    "Page index": "页面目录",
+    "article": "文章",
+    "selection": "选中内容",
+    "region": "屏幕区域",
+    "readme": "README",
+    "page-index": "页面目录",
+    "current-page": "当前页面"
+  })
+
+  function text(source) {
+    return language === "zh" && chinese[source] !== undefined ? chinese[source] : source
+  }
+
+  function error(source) {
+    if (language !== "zh" || chinese[source] !== undefined) return text(source)
+    return "操作失败：" + source
+  }
+
+  function scope(value) {
+    if (value.indexOf("selection-") === 0) return text("Selected content")
+    var labels = {
+      "article": "Readable article",
+      "github-readme": "GitHub README",
+      "github-issue-loaded": "GitHub Issue discussion",
+      "github-pr-loaded": "GitHub pull request discussion",
+      "discuz-main-post": "Discuz original post",
+      "discuz-current-page": "Discuz current-page discussion",
+      "discuz-current-page-replies": "Discuz visible replies",
+      "forum-current-page": "Discuz thread",
+      "page-index": "Page index"
+    }
+    return text(labels[value] || value)
+  }
+}

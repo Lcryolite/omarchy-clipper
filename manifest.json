@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "lcryolite.clipper",
+  "name": "Clipper",
+  "version": "0.1.0",
+  "author": "Lcryolite",
+  "license": "Apache-2.0",
+  "description": "Save and reopen local clips from the Omarchy bar",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Clipper",
+    "description": "Quick capture and local clip collection",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "executable": "clipper",
+      "dataDir": "",
+      "previewEnabled": false,
+      "previewSide": "right",
+      "language": "system"
+    },
+    "schema": [
+      {
+        "key": "executable",
+        "type": "string",
+        "label": "Clipper executable",
+        "description": "Use an absolute build path while developing, or clipper after installation.",
+        "defaultValue": "clipper"
+      },
+      {
+        "key": "dataDir",
+        "type": "string",
+        "label": "Data directory",
+        "description": "Optional isolated data directory for development and smoke tests.",
+        "defaultValue": ""
+      },
+      {
+        "key": "previewEnabled",
+        "type": "boolean",
+        "label": "Hover preview",
+        "description": "Show saved content beside Clipper while hovering a collection entry.",
+        "defaultValue": false
+      },
+      {
+        "key": "previewSide",
+        "type": "enum",
+        "label": "Preferred preview side",
+        "options": ["right", "left"],
+        "defaultValue": "right"
+      },
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Interface language",
+        "options": ["system", "zh", "en"],
+        "defaultValue": "system"
+      }
+    ]
+  }
+}

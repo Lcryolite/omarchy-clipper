@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Omarchy Clipper",
+  "version": "0.1.0",
+  "description": "Save readable pages, selections, and sourced region captures to Omarchy Clipper.",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "nativeMessaging", "scripting", "storage"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "action": {
+    "default_title": "Save with Omarchy Clipper",
+    "default_popup": "popup.html"
+  }
+}

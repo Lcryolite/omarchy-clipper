@@ -1,0 +1,20 @@
+{
+  "name": "omarchy-clipper",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:extension": "esbuild extension/src/background.ts extension/src/content.ts extension/src/popup.ts --bundle --format=iife --platform=browser --target=chrome120 --outdir=extension/dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "dompurify": "^3.2.7"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.322",
+    "esbuild": "^0.25.4",
+    "typescript": "^5.8.3"
+  }
+}
