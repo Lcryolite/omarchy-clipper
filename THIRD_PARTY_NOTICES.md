@@ -38,6 +38,17 @@ The Apache License 2.0 is available at
 <https://www.apache.org/licenses/LICENSE-2.0>; the Mozilla Public License 2.0
 is available at <https://www.mozilla.org/MPL/2.0/>.
 
+### ipaddr.js 2.5.0
+
+- Source: <https://github.com/whitequark/ipaddr.js>
+- Package: `ipaddr.js@2.5.0`
+- License: MIT (`MIT`)
+- Verified package license file: `LICENSE`, SHA-256
+  `62568a2d1337b77171ecca9db10579163446de1ba6151678e81f06cdc199971b`
+- Copyright notice: Copyright (C) 2011-2017 whitequark
+
+The complete verified MIT license text is included in the locked npm package.
+
 ## Build-only npm packages
 
 These packages are required to type-check or build the extension. Their code

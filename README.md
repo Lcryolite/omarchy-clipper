@@ -209,6 +209,26 @@ Capturing a webpage can fetch its page content and images through the browser.
 Reading an already captured article is local and offline. Clipper has no cloud
 sync service.
 
+Hover-preview titles and captions are literal text; previewing a saved clip does
+not fetch images embedded in its title. Only saved local images are displayed.
+
+Automatic capture rejects local hostnames, non-global literal IP addresses
+(including IPv4-mapped IPv6), credential-bearing URLs, and image redirects.
+Image requests require origin access and omit credentials and referrers. These
+URL checks do not resolve or pin DNS addresses: browser private-network policy
+is an additional boundary, and strict public-only routing is not guaranteed.
+
+Each image download has an 8-second deadline covering headers and its body.
+Origin permission checks and downloads share a 60-second total retrieval budget
+for one capture. A native import starts only while that budget remains; once
+started, Clipper waits for the native host's separate response deadline so a
+successfully saved asset is retained. Blocked, timed-out, or unsupported images
+are marked missing while usable article content is kept as an incomplete
+capture. Images remain limited to 12 MiB compressed data and must fit a
+conservative 64 MiB decoded-raster budget. Oversized images are rejected, not
+silently resized; total process memory can exceed the raster budget. Existing
+saved content and article notes are preserved.
+
 ## Update
 
 The previously published version has no settings-migration helper. Clone the

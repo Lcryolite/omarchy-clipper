@@ -1,5 +1,6 @@
 import type { ArticleCapture, CapturedImage, SelectionCapture } from "./page.js";
 import { NativeHostError } from "./native-response.js";
+import ipaddr from "ipaddr.js";
 
 export type NativeRequestMessage = { op: string; [key: string]: unknown };
 export type NativeRequest = (request: NativeRequestMessage) => Promise<Record<string, any>>;
@@ -50,6 +51,8 @@ export type CaptureDependencies = {
   fetchResource: (url: string, signal: AbortSignal) => Promise<Response>;
   hasOriginAccess: (url: string) => Promise<boolean>;
   finalize: (html: string, assetIds: Readonly<Record<string, string>>) => string | Promise<string>;
+  resourceTimeoutMs?: number;
+  totalTimeoutMs?: number;
   duplicateAction?: DuplicateAction;
   updateTargetId?: string;
 };
@@ -57,6 +60,9 @@ export type CaptureDependencies = {
 const MAX_ASSET_BYTES = 12 * 1024 * 1024;
 const MAX_ASSETS = 32;
 const RESOURCE_TIMEOUT_MS = 8_000;
+const TOTAL_RETRIEVAL_TIMEOUT_MS = 60_000;
+const RESOURCE_TIMEOUT_REASON = "Image request timed out.";
+const TOTAL_TIMEOUT_REASON = "Image capture exceeded the 60-second total retrieval limit.";
 const SAFE_IMAGE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -66,6 +72,10 @@ const SAFE_IMAGE_TYPES = new Set([
 ]);
 
 class UnsupportedImageError extends Error {}
+
+function cancelResponseBody(response: Response): void {
+  void response.body?.cancel().catch(() => undefined);
+}
 
 // Only historical saved records without category metadata need text-based decoding.
 const LEGACY_UNSUPPORTED_IMAGE_REASONS = new Set([
@@ -147,49 +157,31 @@ function isPublicHttpUrl(value: string): boolean {
     return false;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (url.username || url.password) return false;
 
-  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname.endsWith(".local") ||
-    hostname === "0.0.0.0" ||
-    hostname === "::" ||
-    hostname === "::1"
-  ) {
-    return false;
-  }
-
-  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const octets = ipv4.slice(1).map(Number);
-    if (octets.some((octet) => octet > 255)) return false;
-    const [a = 0, b = 0] = octets;
-    if (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168)
-    ) {
-      return false;
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (ipaddr.isValid(hostname)) {
+    const address = ipaddr.parse(hostname);
+    if (address instanceof ipaddr.IPv6 && address.isIPv4MappedAddress()) {
+      return address.toIPv4Address().range() === "unicast";
     }
+    return address.range() === "unicast";
   }
 
-  if (hostname.includes(":")) {
-    const normalized = hostname.toLowerCase();
-    if (normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) {
-      return false;
-    }
-  }
-  return true;
+  return hostname.includes(".")
+    && hostname !== "localhost"
+    && !hostname.endsWith(".localhost")
+    && !hostname.endsWith(".local");
 }
 
-async function readBounded(response: Response): Promise<Uint8Array> {
-  if (!response.ok) throw new Error(`Image request returned HTTP ${response.status}.`);
+async function readBounded(response: Response, signal: AbortSignal): Promise<Uint8Array> {
+  if (!response.ok) {
+    cancelResponseBody(response);
+    throw new Error(`Image request returned HTTP ${response.status}.`);
+  }
   const declaredLength = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(declaredLength) && declaredLength > MAX_ASSET_BYTES) {
+    cancelResponseBody(response);
     throw new UnsupportedImageError("Image exceeds the 12 MiB capture limit.");
   }
 
@@ -200,17 +192,31 @@ async function readBounded(response: Response): Promise<Uint8Array> {
   }
 
   const reader = response.body.getReader();
+  const cancel = (): void => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let length = 0;
-  while (true) {
-    const item = await reader.read();
-    if (item.done) break;
-    length += item.value.byteLength;
-    if (length > MAX_ASSET_BYTES) {
-      await reader.cancel();
-      throw new UnsupportedImageError("Image exceeds the 12 MiB capture limit.");
+  let complete = false;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const item = await reader.read();
+      signal.throwIfAborted();
+      if (item.done) {
+        complete = true;
+        break;
+      }
+      length += item.value.byteLength;
+      if (length > MAX_ASSET_BYTES) {
+        throw new UnsupportedImageError("Image exceeds the 12 MiB capture limit.");
+      }
+      chunks.push(item.value);
     }
-    chunks.push(item.value);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    if (!complete) cancel();
   }
 
   const bytes = new Uint8Array(length);
@@ -231,17 +237,49 @@ function base64(bytes: Uint8Array): string {
   return btoa(pieces.join(""));
 }
 
-async function fetchWithTimeout(
+async function withResourceTimeout<T>(
   fetchResource: CaptureDependencies["fetchResource"],
   url: string,
-): Promise<Response> {
+  timeoutMs: number,
+  timeoutReason: string,
+  consume: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), RESOURCE_TIMEOUT_MS);
+  const timeoutError = new Error(timeoutReason);
+  let rejectTimeout!: (error: Error) => void;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const timeout = setTimeout(() => {
+    controller.abort(timeoutError);
+    rejectTimeout(timeoutError);
+  }, timeoutMs);
   try {
-    return await fetchResource(url, controller.signal);
+    const operation = fetchResource(url, controller.signal).then((response) => {
+      if (controller.signal.aborted) {
+        cancelResponseBody(response);
+        controller.signal.throwIfAborted();
+      }
+      return consume(response, controller.signal);
+    });
+    return await Promise.race([operation, timeoutPromise]);
   } catch (error) {
-    if (controller.signal.aborted) throw new Error("Image request timed out.");
+    if (controller.signal.aborted) throw timeoutError;
     throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function beforeDeadline<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  const timeoutError = new Error(TOTAL_TIMEOUT_REASON);
+  let rejectTimeout!: (error: Error) => void;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const timeout = setTimeout(() => rejectTimeout(timeoutError), timeoutMs);
+  try {
+    return await Promise.race([operation, timeoutPromise]);
   } finally {
     clearTimeout(timeout);
   }
@@ -277,6 +315,10 @@ async function importCaptureAssets(
   const assetsByUrl = new Map<string, string>();
   const missingUrls = new Set<string>();
   let uniqueResources = 0;
+  const resourceTimeoutMs = dependencies.resourceTimeoutMs ?? RESOURCE_TIMEOUT_MS;
+  const totalTimeoutMs = dependencies.totalTimeoutMs ?? TOTAL_RETRIEVAL_TIMEOUT_MS;
+  const totalDeadline = performance.now() + totalTimeoutMs;
+  let totalExpired = false;
 
   for (const image of images) {
     const resourceKey = image.url || `unresolved:${image.key}`;
@@ -308,6 +350,16 @@ async function importCaptureAssets(
       continue;
     }
     uniqueResources += 1;
+    let remainingMs = totalDeadline - performance.now();
+    if (totalExpired || remainingMs <= 0) {
+      missing.push({
+        url: image.url,
+        reason: TOTAL_TIMEOUT_REASON,
+        category: "transient",
+        retryable: true,
+      });
+      continue;
+    }
     if (!isPublicHttpUrl(image.url)) {
       missing.push({
         url: image.url,
@@ -317,7 +369,15 @@ async function importCaptureAssets(
       });
       continue;
     }
-    if (!(await dependencies.hasOriginAccess(image.url))) {
+    let hasOriginAccess: boolean;
+    try {
+      hasOriginAccess = await beforeDeadline(dependencies.hasOriginAccess(image.url), remainingMs);
+    } catch (error) {
+      if (reason(error) === TOTAL_TIMEOUT_REASON) totalExpired = true;
+      missing.push(failure(image.url, error));
+      continue;
+    }
+    if (!hasOriginAccess) {
       missing.push({
         url: image.url,
         reason: "Permission is required to retry this public image origin.",
@@ -327,16 +387,46 @@ async function importCaptureAssets(
       continue;
     }
 
+    remainingMs = totalDeadline - performance.now();
+    if (remainingMs <= 0) {
+      totalExpired = true;
+      missing.push({
+        url: image.url,
+        reason: TOTAL_TIMEOUT_REASON,
+        category: "transient",
+        retryable: true,
+      });
+      continue;
+    }
+
     try {
-      const response = await fetchWithTimeout(dependencies.fetchResource, image.url);
-      const mime = (response.headers.get("content-type") ?? "").split(";", 1)[0]!.trim().toLowerCase();
-      if (!SAFE_IMAGE_TYPES.has(mime)) throw new UnsupportedImageError("Resource is not a supported image type.");
-      const bytes = await readBounded(response);
+      const timeoutReason = remainingMs <= resourceTimeoutMs ? TOTAL_TIMEOUT_REASON : RESOURCE_TIMEOUT_REASON;
+      const downloaded = await withResourceTimeout(
+        dependencies.fetchResource,
+        image.url,
+        Math.min(resourceTimeoutMs, remainingMs),
+        timeoutReason,
+        async (response, signal) => {
+          if (response.redirected || response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+            cancelResponseBody(response);
+            throw new UnsupportedImageError("Image redirects are not captured.");
+          }
+          const mime = (response.headers.get("content-type") ?? "").split(";", 1)[0]!.trim().toLowerCase();
+          if (!SAFE_IMAGE_TYPES.has(mime)) {
+            cancelResponseBody(response);
+            throw new UnsupportedImageError("Resource is not a supported image type.");
+          }
+          const bytes = await readBounded(response, signal);
+          signal.throwIfAborted();
+          return { bytes, mime };
+        },
+      );
+      if (totalDeadline - performance.now() <= 0) throw new Error(TOTAL_TIMEOUT_REASON);
       const imported = record(
         await dependencies.native({
           op: "asset.import",
-          data: base64(bytes),
-          mime,
+          data: base64(downloaded.bytes),
+          mime: downloaded.mime,
           name: image.name,
         }),
         "asset.import",
@@ -346,6 +436,7 @@ async function importCaptureAssets(
       assetsByUrl.set(resourceKey, assetId);
       assetsByKey[image.key] = assetId;
     } catch (error) {
+      if (reason(error) === TOTAL_TIMEOUT_REASON) totalExpired = true;
       missing.push(failure(image.url, error));
     }
   }

@@ -869,6 +869,8 @@ QJsonObject Collection::dispatch(const QJsonObject &request)
         }
 
         if (op == "asset.import") {
+            constexpr int decodedRasterBudgetMiB = 64;
+            constexpr quint64 decodedRasterBudget = quint64(decodedRasterBudgetMiB) * 1024 * 1024;
             check(request.value("data").isString(), "data must be base64 text");
             check(request.value("mime").isString(), "mime is required");
             const QByteArray encoded = request.value("data").toString().toLatin1();
@@ -882,10 +884,35 @@ QJsonObject Collection::dispatch(const QJsonObject &request)
             QImageReader reader(&buffer);
             reader.setDecideFormatFromContent(true);
             const QByteArray format = reader.format().toLower();
+            check(reader.canRead(), "Asset is not a valid image", "IMAGE_DECODE_FAILED");
+            const QSize encodedSize = reader.size();
+            const QImage::Format decodedFormat = reader.imageFormat();
+            check(encodedSize.width() > 0 && encodedSize.height() > 0,
+                  "Asset image dimensions are unsupported", "IMAGE_DIMENSIONS_UNSUPPORTED");
+            const quint64 width = quint64(encodedSize.width());
+            const quint64 height = quint64(encodedSize.height());
+            quint64 bitsPerPixel = 32;
+            if (decodedFormat != QImage::Format_Invalid) {
+                bitsPerPixel = qMax<quint64>(
+                    bitsPerPixel, QImage::toPixelFormat(decodedFormat).bitsPerPixel());
+            } else {
+                check(format == "png" || format == "jpeg" || format == "jpg"
+                          || format == "gif" || format == "webp" || format == "bmp",
+                      "Asset image format is unsupported", "IMAGE_FORMAT_UNSUPPORTED");
+                if (format == "png")
+                    bitsPerPixel = 64;
+            }
+            const quint64 bytesPerPixel = (bitsPerPixel + 7) / 8;
+            check(bytesPerPixel > 0 && width <= decodedRasterBudget / bytesPerPixel
+                      && height <= decodedRasterBudget / (width * bytesPerPixel),
+                  "Asset image dimensions are unsupported", "IMAGE_DIMENSIONS_UNSUPPORTED");
+            const int allocationLimit = QImageReader::allocationLimit();
+            if (allocationLimit <= 0 || allocationLimit > decodedRasterBudgetMiB)
+                QImageReader::setAllocationLimit(decodedRasterBudgetMiB);
             const QImage image = reader.read();
             check(!image.isNull(), "Asset is not a valid image", "IMAGE_DECODE_FAILED");
             check(image.width() > 0 && image.height() > 0
-                      && qint64(image.width()) * qint64(image.height()) <= 100000000,
+                      && quint64(image.sizeInBytes()) <= decodedRasterBudget,
                   "Asset image dimensions are unsupported", "IMAGE_DIMENSIONS_UNSUPPORTED");
 
             QString mime;

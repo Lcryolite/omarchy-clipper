@@ -322,6 +322,7 @@ Item {
           Text {
             width: parent.width
             text: root.previewClip ? String(root.previewClip.title || translations.text("Untitled clip")) : ""
+            textFormat: Text.PlainText
             color: root.foregroundColor
             font.family: root.fontFamily
             font.pixelSize: 14
@@ -335,6 +336,7 @@ Item {
               ? translations.text(root.previewClip.kind === "article" ? "Saved article excerpt" : "Saved clip excerpt")
                 + (root.previewClip.scope ? " · " + translations.scope(String(root.previewClip.scope)) : "")
               : ""
+            textFormat: Text.PlainText
             color: root.mutedColor
             font.family: root.fontFamily
             font.pixelSize: 11

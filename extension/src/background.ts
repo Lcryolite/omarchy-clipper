@@ -304,7 +304,7 @@ function dependencies(
         method: "GET",
         credentials: "omit",
         cache: "no-store",
-        redirect: "follow",
+        redirect: "manual",
         referrerPolicy: "no-referrer",
         signal,
       }),

@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
-    "dompurify": "^3.2.7"
+    "dompurify": "^3.2.7",
+    "ipaddr.js": "^2.5.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.322",
