@@ -76,20 +76,23 @@ Tags: Bar, Quickshell
 ## Migrate an older copied installation
 
 If an earlier development version copied the plugin into the Omarchy plugin
-directory, update that source checkout to a version containing
-`scripts/uninstall.py`, then remove its owned files before adding the official
-Git-managed plugin:
+directory, retain its settings before disabling it. From the matching older
+source checkout, which must contain `scripts/uninstall.py`, run:
 
 ```sh
-omarchy plugin disable lcryolite.clipper
-python3 scripts/uninstall.py --dry-run
+MIGRATION_SOURCE="$(mktemp -d)" &&
+git clone --depth 1 https://github.com/Lcryolite/omarchy-clipper "$MIGRATION_SOURCE" &&
+python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings &&
+omarchy plugin disable lcryolite.clipper &&
+python3 scripts/uninstall.py --dry-run &&
 python3 scripts/uninstall.py
 ```
 
-Do not pass `--purge-data-dir` during migration. Ordinary uninstall preserves
-the collection. Continue with the Git add, build, and companion installation
-below; the installer recognizes the known older layout without overwriting an
-unrelated plugin.
+The command chain stops before disabling the old widget if cloning or settings
+migration fails. Do not pass `--purge-data-dir` during migration. Ordinary
+uninstall preserves the durable settings and collection. Continue with the Git
+add, build, and companion installation below; the installer recognizes the
+known older layout without overwriting an unrelated plugin.
 
 If the uninstaller reports that legacy companion files do not match the
 checkout, use the matching older checkout or build the current components and
@@ -159,7 +162,13 @@ For webpage capture, open the extension popup on the source page and choose the 
 
 ## Settings
 
-Open the monochrome gear in the panel header. Changes apply immediately and are saved in the widget's Omarchy configuration; the return arrow goes back to the collection.
+Open the monochrome gear in the panel header. Changes apply immediately and
+are saved in Clipper's durable configuration; the return arrow goes back to
+the collection. The settings file is
+`${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-clipper/settings.json`, outside both
+the Omarchy bar layout and the collection. Ordinary plugin disable or removal
+preserves it. If saving fails, Clipper reports the error and keeps the last
+valid saved settings.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
@@ -167,7 +176,27 @@ Open the monochrome gear in the panel header. Changes apply immediately and are 
 | Preferred preview side | Right | Choose left or right. When space is limited, the preview switches sides or shrinks; it stays hidden if neither side fits. Click the clip to read it instead. Turning preview off disables these controls but retains your preference. |
 | Interface language | Follow system | Choose Follow system, Chinese, or English. Unsupported system languages use English. The extension applies the shared language next time its popup opens; saved content is never translated. |
 
-The advanced widget configuration also accepts `executable` (default `clipper`) and `dataDir` (default empty, using the normal collection directory). Use an absolute executable path for a custom build and a separate data directory for isolated testing.
+Advanced configuration accepts `dataDir` (default `""`, which uses the normal
+collection directory) and `executable` (default `"clipper"`). Close the panel,
+then use the helper from the plugin checkout to set either or both values. Use
+absolute paths for a custom collection or executable:
+
+```sh
+SETTINGS_HELPER="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper/clipper-settings.py" &&
+python3 "$SETTINGS_HELPER" set dataDir '"/absolute/path/to/collection"' &&
+python3 "$SETTINGS_HELPER" set executable '"/absolute/path/to/clipper"'
+```
+
+To restore both defaults:
+
+```sh
+SETTINGS_HELPER="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper/clipper-settings.py" &&
+python3 "$SETTINGS_HELPER" set dataDir '""' &&
+python3 "$SETTINGS_HELPER" set executable '"clipper"'
+```
+
+Direct helper changes are loaded the next time the panel opens. Each value is
+a JSON string; a failed command leaves the previous saved settings intact.
 
 ## Data and network behavior
 
@@ -182,31 +211,54 @@ sync service.
 
 ## Update
 
-Update the plugin checkout first, then rebuild and reinstall the companion
-components before re-enabling the widget. A plugin update alone does not
-replace the installed native executable or reload browser extensions.
+The previously published version has no settings-migration helper. Clone the
+latest source into a temporary directory and retain the current widget settings
+before the first disable. Then update the plugin checkout, rebuild and reinstall
+the companion components, and re-enable the widget. A plugin update alone does
+not replace the installed native executable or reload browser extensions.
 
 ```sh
-omarchy plugin disable lcryolite.clipper
-omarchy plugin update lcryolite.clipper
-cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper"
-make -j2 all
-npm ci --ignore-scripts
-make extension
-npm run typecheck
+MIGRATION_SOURCE="$(mktemp -d)" &&
+git clone --depth 1 https://github.com/Lcryolite/omarchy-clipper "$MIGRATION_SOURCE" &&
+python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings &&
+omarchy plugin disable lcryolite.clipper &&
+omarchy plugin update lcryolite.clipper &&
+cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper" &&
+make -j2 all &&
+npm ci --ignore-scripts &&
+make extension &&
+npm run typecheck &&
 python3 scripts/install.py \
   --chromium-extension-id CHROMIUM_EXTENSION_ID \
   --brave-extension-id BRAVE_EXTENSION_ID \
-  --dry-run
+  --dry-run &&
 python3 scripts/install.py \
   --chromium-extension-id CHROMIUM_EXTENSION_ID \
-  --brave-extension-id BRAVE_EXTENSION_ID
-omarchy plugin enable lcryolite.clipper
+  --brave-extension-id BRAVE_EXTENSION_ID &&
+omarchy plugin enable lcryolite.clipper &&
+omarchy restart shell
 ```
 
+If cloning or migration fails, the command chain stops with the old widget
+still enabled. The final shell restart loads the updated panel; the bar briefly
+disappears while desktop applications and the collection remain in place.
 Reload each unpacked browser extension after rebuilding it. Repeated companion
 installation updates both owned programs and other owned files while preserving
-the collection.
+the durable settings and collection.
+
+If migration reports that no legacy Clipper settings were found, do not disable
+the old widget. Restore a settings backup, or use the helper from the newly
+cloned `MIGRATION_SOURCE` to set values you explicitly know, then retry migration:
+
+```sh
+python3 "$MIGRATION_SOURCE/clipper-settings.py" set dataDir '"/absolute/path/to/collection"'
+python3 "$MIGRATION_SOURCE/clipper-settings.py" set executable '"/absolute/path/to/clipper"'
+python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings
+```
+
+Omit a `set` command when that value is unknown and restore it from a backup
+instead. Clipper does not search private filesystem locations or guess lost
+settings.
 
 ## Uninstall
 
@@ -214,19 +266,19 @@ Remove both companion programs and browser registrations while the checkout
 still exists:
 
 ```sh
-cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper"
-omarchy plugin disable lcryolite.clipper
-python3 scripts/uninstall.py --dry-run
+cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper" &&
+omarchy plugin disable lcryolite.clipper &&
+python3 scripts/uninstall.py --dry-run &&
 python3 scripts/uninstall.py
 ```
 
-Ordinary uninstall preserves the collection. To permanently remove it, name
-the exact collection path explicitly and review the plan before removing the
-plugin checkout:
+Ordinary uninstall and plugin removal preserve the durable settings and
+collection. To permanently remove the collection, name its exact path
+explicitly and review the plan before removing the plugin checkout:
 
 ```sh
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-clipper"
-python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR" --dry-run
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-clipper" &&
+python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR" --dry-run &&
 python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR"
 ```
 
@@ -236,13 +288,16 @@ does not remove a shared parent directory.
 After either preservation or explicit purge, remove the plugin checkout:
 
 ```sh
-cd ..
+cd .. &&
 omarchy plugin remove lcryolite.clipper
 ```
 
 ## Troubleshooting
 
 - **The widget opens but requests fail:** ensure the companion programs were built and installed, `clipper` is on the shell's executable search path, and the configured data directory is writable. A plugin checkout alone is not a complete installation.
+- **The selected collection is unavailable:** Clipper reports the error and does not open the default collection instead. Restore access to the selected directory or explicitly set `dataDir` to the intended path or its default as shown above.
+- **Settings cannot be saved:** check that `${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-clipper` is writable, then retry the change. The last valid saved settings remain in use.
+- **Settings were lost before migration:** settings removed with the old bar entry cannot be reconstructed by guessing private filesystem locations. Keep the old widget enabled. Restore a settings backup, or use the newly cloned `MIGRATION_SOURCE/clipper-settings.py` as shown in Update to explicitly set known `dataDir` and `executable` values before retrying migration; existing collection contents remain at their original path.
 - **Browser capture cannot reach Clipper:** confirm the unpacked extension's ID matches the native-host registration for that browser, then reload the extension.
 - **The panel still looks old after updating:** inspect the installed checkout and `qs log -p /usr/share/omarchy/shell --tail 100`. A shell restart with `omarchy restart shell` reloads the desktop shell and briefly interrupts the bar.
 

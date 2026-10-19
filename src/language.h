@@ -18,6 +18,7 @@ public:
     QString language() const { return m_language; }
     QString resolvedLanguage() const { return m_resolvedLanguage; }
     QString settingsPath() const { return m_settingsPath; }
+    QString error() const { return m_error; }
 
 signals:
     void languageChanged();
@@ -28,6 +29,7 @@ private:
     void installTranslation(const QString &language);
 
     QString m_settingsPath;
+    QString m_error;
     QString m_language = QStringLiteral("system");
     QString m_resolvedLanguage = QStringLiteral("en");
     QFileSystemWatcher m_watcher;

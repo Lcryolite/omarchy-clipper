@@ -66,15 +66,18 @@ Clipper 以当前用户身份运行。Omarchy 插件在长期运行的 shell 中
 
 ## 迁移旧版复制安装
 
-如果早期开发版本将插件直接复制到 Omarchy 插件目录，请先将该源码检出更新到包含 `scripts/uninstall.py` 的版本，再移除其管理的文件，最后添加由官方 Git 流程管理的插件：
+如果早期开发版本将插件直接复制到 Omarchy 插件目录，请在禁用前保留其设置。在包含 `scripts/uninstall.py` 且与旧安装匹配的源码检出目录中运行：
 
 ```sh
-omarchy plugin disable lcryolite.clipper
-python3 scripts/uninstall.py --dry-run
+MIGRATION_SOURCE="$(mktemp -d)" &&
+git clone --depth 1 https://github.com/Lcryolite/omarchy-clipper "$MIGRATION_SOURCE" &&
+python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings &&
+omarchy plugin disable lcryolite.clipper &&
+python3 scripts/uninstall.py --dry-run &&
 python3 scripts/uninstall.py
 ```
 
-迁移时不要传入 `--purge-data-dir`。普通卸载会保留收藏。之后继续下方的 Git 添加、构建和配套程序安装步骤；安装器可识别已知旧版布局，不会覆盖无关插件。
+如果克隆或设置迁移失败，命令链会在禁用旧控件前停止。迁移时不要传入 `--purge-data-dir`。普通卸载会保留持久设置和收藏。之后继续下方的 Git 添加、构建和配套程序安装步骤；安装器可识别已知旧版布局，不会覆盖无关插件。
 
 如果卸载器提示旧版配套文件与当前检出不匹配，请使用匹配的旧版检出，或构建当前组件后，带上已配置的扩展 ID 运行一次安装器。该迁移会记录准确的文件归属，让后续卸载能移除组件，而无需猜测同名文件的归属。
 
@@ -130,7 +133,7 @@ omarchy-shell shell hide lcryolite.clipper
 
 ## 设置
 
-点击面板标题栏的单色齿轮进入设置。修改立即生效，并保存到控件的 Omarchy 配置中；返回箭头可回到收藏列表。
+点击面板标题栏的单色齿轮进入设置。修改立即生效，并保存到 Clipper 的持久配置中；返回箭头可回到收藏列表。设置文件位于 `${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-clipper/settings.json`，独立于 Omarchy 状态栏布局和收藏目录。普通禁用或移除插件会保留该文件。如果保存失败，Clipper 会显示错误，并保留上次有效的已保存设置。
 
 | 设置 | 默认值 | 行为 |
 | --- | --- | --- |
@@ -138,7 +141,23 @@ omarchy-shell shell hide lcryolite.clipper
 | 预览首选侧边 | 右侧 | 可选左侧或右侧。空间不足时自动换边或缩小；两侧均放不下时隐藏，可点击收藏阅读。关闭预览会禁用这些控件，但保留偏好。 |
 | 界面语言 | 跟随系统 | 可选跟随系统、中文或 English。系统语言不受支持时使用英文。扩展下次打开弹窗时应用共享语言；不会翻译已保存内容。 |
 
-高级控件配置还支持 `executable`（默认 `clipper`）和 `dataDir`（默认空值，使用常规收藏目录）。自定义构建请使用可执行文件的绝对路径，隔离测试请使用独立的数据目录。
+高级配置支持 `dataDir`（默认为 `""`，使用常规收藏目录）和 `executable`（默认为 `"clipper"`）。先关闭面板，再使用插件检出目录中的辅助工具设置其中一项或两项。自定义收藏目录或可执行文件时请使用绝对路径：
+
+```sh
+SETTINGS_HELPER="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper/clipper-settings.py" &&
+python3 "$SETTINGS_HELPER" set dataDir '"/absolute/path/to/collection"' &&
+python3 "$SETTINGS_HELPER" set executable '"/absolute/path/to/clipper"'
+```
+
+恢复两项默认值：
+
+```sh
+SETTINGS_HELPER="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper/clipper-settings.py" &&
+python3 "$SETTINGS_HELPER" set dataDir '""' &&
+python3 "$SETTINGS_HELPER" set executable '"clipper"'
+```
+
+辅助工具的直接修改会在下次打开面板时载入。每个值都是 JSON 字符串；命令失败时，先前保存的设置保持不变。
 
 ## 数据与网络行为
 
@@ -148,44 +167,58 @@ omarchy-shell shell hide lcryolite.clipper
 
 ## 更新
 
-先更新插件检出，再重新构建和安装配套组件，最后重新启用控件。仅更新插件不会替换已安装的原生可执行文件，也不会重新加载浏览器扩展。
+先前发布的版本没有设置迁移辅助工具。首次禁用前，请将最新源码克隆到临时目录，并保留当前控件设置。然后更新插件检出、重新构建和安装配套组件，最后重新启用控件。仅更新插件不会替换已安装的原生可执行文件，也不会重新加载浏览器扩展。
 
 ```sh
-omarchy plugin disable lcryolite.clipper
-omarchy plugin update lcryolite.clipper
-cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper"
-make -j2 all
-npm ci --ignore-scripts
-make extension
-npm run typecheck
+MIGRATION_SOURCE="$(mktemp -d)" &&
+git clone --depth 1 https://github.com/Lcryolite/omarchy-clipper "$MIGRATION_SOURCE" &&
+python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings &&
+omarchy plugin disable lcryolite.clipper &&
+omarchy plugin update lcryolite.clipper &&
+cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper" &&
+make -j2 all &&
+npm ci --ignore-scripts &&
+make extension &&
+npm run typecheck &&
 python3 scripts/install.py \
   --chromium-extension-id CHROMIUM_EXTENSION_ID \
   --brave-extension-id BRAVE_EXTENSION_ID \
-  --dry-run
+  --dry-run &&
 python3 scripts/install.py \
   --chromium-extension-id CHROMIUM_EXTENSION_ID \
-  --brave-extension-id BRAVE_EXTENSION_ID
-omarchy plugin enable lcryolite.clipper
+  --brave-extension-id BRAVE_EXTENSION_ID &&
+omarchy plugin enable lcryolite.clipper &&
+omarchy restart shell
 ```
 
-重新构建后，请重新加载各个已解压的浏览器扩展。重复安装配套组件会更新两个受管理程序及其他受管理文件，同时保留收藏。
+如果克隆或迁移失败，命令链会停止，旧控件仍保持启用。最后的 shell 重启会载入更新后的面板；状态栏会短暂消失，桌面应用与收藏保持不变。重新构建后，请重新加载各个已解压的浏览器扩展。重复安装配套组件会更新两个受管理程序及其他受管理文件，同时保留持久设置和收藏。
+
+如果迁移提示未找到旧版 Clipper 设置，请勿禁用旧控件。请恢复设置备份，或使用刚克隆到 `MIGRATION_SOURCE` 的辅助工具写入你明确知道的值，然后重试迁移：
+
+```sh
+python3 "$MIGRATION_SOURCE/clipper-settings.py" set dataDir '"/absolute/path/to/collection"'
+python3 "$MIGRATION_SOURCE/clipper-settings.py" set executable '"/absolute/path/to/clipper"'
+python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings
+```
+
+如果某个值未知，请省略对应的 `set` 命令，改从备份恢复。Clipper 不会搜索私有文件系统位置或猜测已丢失的设置。
 
 ## 卸载
 
 在检出目录仍存在时，移除两个配套程序和浏览器注册：
 
 ```sh
-cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper"
-omarchy plugin disable lcryolite.clipper
-python3 scripts/uninstall.py --dry-run
+cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper" &&
+omarchy plugin disable lcryolite.clipper &&
+python3 scripts/uninstall.py --dry-run &&
 python3 scripts/uninstall.py
 ```
 
-普通卸载保留收藏。如需永久删除收藏，请明确指定准确的收藏路径，并在移除插件检出前检查计划：
+普通卸载和移除插件会保留持久设置与收藏。如需永久删除收藏，请明确指定准确的收藏路径，并在移除插件检出前检查计划：
 
 ```sh
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-clipper"
-python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR" --dry-run
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-clipper" &&
+python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR" --dry-run &&
 python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR"
 ```
 
@@ -194,13 +227,16 @@ python3 scripts/uninstall.py --purge-data-dir "$DATA_DIR"
 保留收藏或明确清除完成后，移除插件检出：
 
 ```sh
-cd ..
+cd .. &&
 omarchy plugin remove lcryolite.clipper
 ```
 
 ## 故障排查
 
 - **控件能打开，但请求失败：**确认已构建并安装配套程序，`clipper` 位于 shell 的可执行文件搜索路径中，配置的数据目录可写。只有插件检出并不构成完整安装。
+- **所选收藏目录不可用：**Clipper 会显示错误，不会改为打开默认收藏。请恢复所选目录的访问权限，或按上文将 `dataDir` 明确设置为预期路径或默认值。
+- **无法保存设置：**确认 `${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-clipper` 可写，然后重试修改。系统会继续使用上次有效的已保存设置。
+- **迁移前设置已经丢失：**随旧状态栏条目一同移除的设置无法通过猜测私有文件系统位置来重建。请保持旧控件启用，恢复设置备份，或按“更新”一节使用刚克隆的 `MIGRATION_SOURCE/clipper-settings.py` 明确设置已知的 `dataDir` 与 `executable` 后重试迁移；现有收藏内容仍保留在原目录中。
 - **浏览器捕获无法连接 Clipper：**确认已解压扩展的 ID 与该浏览器的原生宿主注册一致，然后重新加载扩展。
 - **更新后面板仍像旧版：**检查已安装的检出及 `qs log -p /usr/share/omarchy/shell --tail 100`。使用 `omarchy restart shell` 可重新加载桌面 shell，状态栏会短暂中断。
 

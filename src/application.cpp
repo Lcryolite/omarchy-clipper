@@ -183,9 +183,11 @@ QJsonObject Application::dispatch(const QJsonObject &value, bool native) {
     static const QSet<QString> nativeOps{"capture.check", "capture.begin", "capture.finish", "capture.abort", "capture.pending", "capture.mixed", "capture.region", "asset.import", "clip.open", "clip.restore", "settings.get"};
     if (native && !nativeOps.contains(op)) return failure("Operation is not available to browser clients");
     try {
-        if (op == "settings.get")
+        if (op == "settings.get") {
+            if (!m_language.error().isEmpty()) return failure(m_language.error());
             return success(QJsonObject{{"language", language()},
                                        {"resolvedLanguage", resolvedLanguage()}});
+        }
         if (op == "theme.get") return success(currentTheme());
         if (op == "link.open") {
             const auto url = value.value("url").toString();

@@ -272,9 +272,22 @@ def main():
     parser.add_argument("--prefix", type=Path, default=Path.home() / ".local")
     parser.add_argument("--config-dir", type=Path, default=Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--migrate-settings", action="store_true", help="Retain current widget settings before disabling the old plugin; no build required")
     args = parser.parse_args()
     rollback = None
     try:
+        if args.migrate_settings:
+            if args.dry_run:
+                raise InstallError("settings migration is an explicit write; omit --dry-run to perform it")
+            helper = ROOT / "clipper-settings.py"
+            if not helper.is_file():
+                helper = ROOT / "plugin/clipper-settings.py"
+            result = subprocess.run([sys.executable, str(helper), "migrate", "--config-dir", str(args.config_dir)],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                raise InstallError(result.stderr.strip() or "could not retain Clipper settings")
+            print("Clipper settings retained. It is now safe to disable the old widget.")
+            return
         for value in (args.extension_id, args.chromium_extension_id, args.brave_extension_id):
             validate_extension_id(value)
         browser_ids = {

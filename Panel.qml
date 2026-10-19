@@ -22,9 +22,14 @@ Item {
   property var preferenceQueue: []
   property var currentPreference: null
   property string preferenceError: ""
+  property var effectiveSettings: ({})
+  property bool preferencesReady: false
+  property bool settingsReloadPending: false
+  property bool identityReloadWaitingForDraft: false
+  readonly property string settingsHelper: decodeURIComponent(Qt.resolvedUrl("clipper-settings.py").toString().replace(/^(file|qs):\/\//, ""))
 
-  property string executable: settings && settings.executable ? String(settings.executable) : "clipper"
-  property string dataDir: settings && settings.dataDir ? String(settings.dataDir) : ""
+  property string executable: effectiveSettings.executable || "clipper"
+  property string dataDir: effectiveSettings.dataDir || ""
   property var requestQueue: []
   property var currentJob: null
   property string pendingPayload: ""
@@ -71,8 +76,7 @@ Item {
   function open() {
     opened = true
     refreshTheme()
-    loadDraft()
-    reloadClips()
+    schedulePreferencesReload()
     Qt.callLater(function() { searchInput.forceActiveFocus() })
   }
 
@@ -90,13 +94,13 @@ Item {
   }
 
   function startNextPreference() {
-    if (preferenceProcess.running || currentPreference || preferenceQueue.length === 0) return
+    if (!preferencesReady || preferenceProcess.running || currentPreference || preferenceQueue.length === 0) return
     var next = preferenceQueue.slice()
     currentPreference = next.shift()
     preferenceQueue = next
     preferenceProcess.command = [
-      "omarchy-shell", "shell", "setBarWidget", moduleName,
-      currentPreference.key, JSON.stringify(currentPreference.value), "{}"
+      "python3", settingsHelper, "set",
+      currentPreference.key, JSON.stringify(currentPreference.value)
     ]
     preferenceProcess.running = true
   }
@@ -105,7 +109,9 @@ Item {
     var saved = currentPreference
     currentPreference = null
     var output = String(preferenceStdout.text || "").trim()
-    if (exitCode !== 0 || output !== "ok") {
+    var parsed = null
+    try { parsed = JSON.parse(output) } catch (_) {}
+    if (exitCode !== 0 || !parsed) {
       preferenceError = String(preferenceStderr.text || output
         || "Could not save this setting.").trim()
       if (saved && settingsPane) {
@@ -116,8 +122,45 @@ Item {
         else if (saved.key === "language" && settingsPane.languageOverride === saved.value)
           settingsPane.languageOverride = undefined
       }
+    } else if (saved) {
+      var updated = ({})
+      for (var key in effectiveSettings) updated[key] = effectiveSettings[key]
+      updated[saved.key] = parsed[saved.key]
+      effectiveSettings = updated
     }
     Qt.callLater(startNextPreference)
+  }
+
+  function schedulePreferencesReload() {
+    settingsReloadPending = true
+    searchTimer.stop()
+    reloadPreferences.restart()
+  }
+
+  function resetCollectionState() {
+    autosaveTimer.stop()
+    searchTimer.stop()
+    externalPreview.controller.dismissNow()
+    clips = []
+    totalClips = 0
+    pageOffset = 0
+    filter = "all"
+    query = ""
+    trashMode = false
+    listLoading = false
+    listError = ""
+    draftText = ""
+    draftAssets = []
+    draftRevision = 0
+    draftLoaded = false
+    draftDirty = false
+    draftSaving = false
+    draftSaveAgain = false
+    afterDraftSave = []
+    draftState = "Loading draft…"
+    draftError = ""
+    committing = false
+    capturingRegion = false
   }
 
   function closeForPopoutSwitch() {
@@ -127,6 +170,10 @@ Item {
   }
 
   function request(op, fields, success, failure) {
+    if (!preferencesReady) {
+      if (failure) failure(preferenceError || "Settings are not ready. Close and reopen Clipper to retry.")
+      return
+    }
     var payload = { op: op }
     fields = fields || {}
     for (var key in fields) payload[key] = fields[key]
@@ -225,7 +272,11 @@ Item {
     if (afterSave) afterDraftSave = afterDraftSave.concat([afterSave])
     if (!draftLoaded) return
     if (draftSaving) { draftSaveAgain = true; return }
-    if (!draftDirty) { runAfterDraftSave(); return }
+    if (!draftDirty) {
+      draftSaveAgain = false
+      runAfterDraftSave()
+      return
+    }
 
     draftSaving = true
     draftSaveAgain = false
@@ -251,6 +302,10 @@ Item {
       draftState = "Draft not saved"
       draftError = error
       afterDraftSave = []
+      if (settingsReloadPending) {
+        settingsReloadPending = false
+        identityReloadWaitingForDraft = false
+      }
     })
   }
 
@@ -399,6 +454,68 @@ Item {
   }
 
   Process {
+    id: settingsProcess
+    stdout: StdioCollector { id: settingsStdout; waitForEnd: true }
+    stderr: StdioCollector { id: settingsStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      try {
+        if (exitCode !== 0) throw new Error(String(settingsStderr.text || "Could not load settings."))
+        var next = JSON.parse(settingsStdout.text)
+        var identityChanged = root.effectiveSettings.dataDir !== undefined
+          && (root.dataDir !== String(next.dataDir || "")
+            || root.executable !== String(next.executable || "clipper"))
+        if (identityChanged) root.resetCollectionState()
+        root.effectiveSettings = next
+        root.preferencesReady = true
+        root.settingsReloadPending = false
+        root.preferenceError = ""
+        if (root.opened) {
+          if (identityChanged) root.refreshTheme()
+          root.loadDraft()
+          root.reloadClips()
+        }
+      } catch (error) {
+        root.preferenceError = String(error)
+        root.listError = root.preferenceError
+        root.draftError = root.preferenceError
+        root.clips = []
+        root.settingsReloadPending = false
+      }
+    }
+  }
+
+  Timer {
+    id: reloadPreferences
+    interval: 30
+    onTriggered: {
+      if (!root.settingsReloadPending) return
+      if (root.draftDirty || root.draftSaving || root.draftSaveAgain
+          || autosaveTimer.running || root.afterDraftSave.length) {
+        autosaveTimer.stop()
+        if (!root.identityReloadWaitingForDraft) {
+          root.identityReloadWaitingForDraft = true
+          root.persistDraft(function() {
+            root.identityReloadWaitingForDraft = false
+            reloadPreferences.restart()
+          })
+        }
+        return
+      }
+      if (requestProcess.running || root.currentJob || root.requestQueue.length
+          || preferenceProcess.running || root.currentPreference || root.preferenceQueue.length
+          || settingsProcess.running || captureDelay.running) {
+        restart()
+        return
+      }
+      root.preferencesReady = false
+      settingsProcess.command = ["python3", root.settingsHelper, "load", "--legacy-json", JSON.stringify(root.settings || {})]
+      settingsProcess.running = true
+    }
+  }
+
+  Component.onCompleted: schedulePreferencesReload()
+
+  Process {
     id: requestProcess
     running: false
     command: []
@@ -471,6 +588,7 @@ Item {
       ColumnLayout {
         anchors.fill: parent
         visible: !root.settingsOpen
+        enabled: root.preferencesReady && !root.settingsReloadPending
         spacing: Style.space(8)
 
         RowLayout {
@@ -674,6 +792,7 @@ Item {
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
               selectByMouse: true
+              enabled: root.preferencesReady && !root.settingsReloadPending && root.draftLoaded
               background: null
               onTextChanged: {
                 if (root.draftLoaded && root.draftText !== text) {
@@ -790,7 +909,8 @@ Item {
           id: settingsPane
           anchors.fill: parent
           anchors.margins: Style.spacing.panelPadding
-          settings: root.settings
+          settings: root.effectiveSettings
+          enabled: root.preferencesReady && !root.settingsReloadPending
           resolvedLanguage: root.resolvedLanguage
           persistFunction: function(key, value) { root.persistPreference(key, value) }
           foregroundColor: root.foregroundColor

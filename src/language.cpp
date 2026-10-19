@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
+#include <QSet>
 
 namespace {
 constexpr auto pluginId = "lcryolite.clipper";
@@ -40,6 +41,59 @@ QString systemLanguage()
     if (name == QStringLiteral("zh") || name.startsWith(QStringLiteral("zh_")))
         return QStringLiteral("zh");
     return QStringLiteral("en");
+}
+
+bool retainedLanguage(const QJsonDocument &document, QString *language)
+{
+    if (!document.isObject())
+        return false;
+    const QJsonObject root = document.object();
+    const QJsonValue version = root.value(QStringLiteral("version"));
+    const QJsonValue stored = root.value(QStringLiteral("settings"));
+    if (!version.isDouble() || version.toDouble() != 1 || !stored.isObject())
+        return false;
+
+    const QJsonObject settings = stored.toObject();
+    static const QSet<QString> knownKeys = {
+        QStringLiteral("language"), QStringLiteral("previewEnabled"),
+        QStringLiteral("previewSide"), QStringLiteral("dataDir"),
+        QStringLiteral("executable"),
+    };
+    for (auto iterator = settings.constBegin(); iterator != settings.constEnd(); ++iterator) {
+        if (!knownKeys.contains(iterator.key()))
+            return false;
+    }
+
+    const QJsonValue languageValue = settings.value(QStringLiteral("language"));
+    const QString nextLanguage = languageValue.isUndefined()
+        ? QStringLiteral("system") : languageValue.toString();
+    if ((!languageValue.isUndefined() && !languageValue.isString())
+        || (nextLanguage != QStringLiteral("system") && nextLanguage != QStringLiteral("zh")
+            && nextLanguage != QStringLiteral("en")))
+        return false;
+
+    const QJsonValue previewEnabled = settings.value(QStringLiteral("previewEnabled"));
+    if (!previewEnabled.isUndefined() && !previewEnabled.isBool())
+        return false;
+    const QJsonValue previewSide = settings.value(QStringLiteral("previewSide"));
+    const QString side = previewSide.isUndefined() ? QStringLiteral("right") : previewSide.toString();
+    if ((!previewSide.isUndefined() && !previewSide.isString())
+        || (side != QStringLiteral("left") && side != QStringLiteral("right")))
+        return false;
+
+    const QJsonValue dataDir = settings.value(QStringLiteral("dataDir"));
+    const QString directory = dataDir.isUndefined() ? QString() : dataDir.toString();
+    if ((!dataDir.isUndefined() && !dataDir.isString()) || directory.contains(QChar::Null)
+        || (!directory.isEmpty() && !directory.startsWith(QLatin1Char('/'))))
+        return false;
+    const QJsonValue executable = settings.value(QStringLiteral("executable"));
+    const QString program = executable.isUndefined() ? QStringLiteral("clipper") : executable.toString();
+    if ((!executable.isUndefined() && !executable.isString()) || program.contains(QChar::Null)
+        || program.trimmed().isEmpty())
+        return false;
+
+    *language = nextLanguage;
+    return true;
 }
 }
 
@@ -102,7 +156,8 @@ QString localizedUserMessage(const QString &message)
 
 LanguageSettings::LanguageSettings(QObject *parent)
     : QObject(parent)
-    , m_settingsPath(QDir::home().filePath(QStringLiteral(".config/omarchy/shell.json")))
+    , m_settingsPath(QDir(qEnvironmentVariable("XDG_CONFIG_HOME", QDir::homePath() + "/.config"))
+                         .filePath(QStringLiteral("omarchy-clipper/settings.json")))
 {
     m_refreshTimer.setSingleShot(true);
     m_refreshTimer.setInterval(25);
@@ -129,17 +184,43 @@ void LanguageSettings::watchSettings()
         m_watcher.removePath(m_settingsPath);
     if (QFileInfo::exists(m_settingsPath))
         m_watcher.addPath(m_settingsPath);
+    const QString legacy = QDir(qEnvironmentVariable("XDG_CONFIG_HOME", QDir::homePath() + "/.config"))
+                               .filePath(QStringLiteral("omarchy/shell.json"));
+    if (QFileInfo::exists(legacy) && !m_watcher.files().contains(legacy))
+        m_watcher.addPath(legacy);
+    const QString legacyDirectory = QFileInfo(legacy).absolutePath();
+    if (QFileInfo::exists(legacyDirectory) && !m_watcher.directories().contains(legacyDirectory))
+        m_watcher.addPath(legacyDirectory);
 }
 
 void LanguageSettings::refresh()
 {
+    m_error.clear();
     QString next = QStringLiteral("system");
-    QFile file(m_settingsPath);
+    const bool retained = QFileInfo::exists(m_settingsPath);
+    const QString legacy = QDir(qEnvironmentVariable("XDG_CONFIG_HOME", QDir::homePath() + "/.config"))
+                               .filePath(QStringLiteral("omarchy/shell.json"));
+    QFile file(retained ? m_settingsPath : legacy);
     if (file.open(QIODevice::ReadOnly)) {
         QJsonParseError error;
         const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
-        if (error.error == QJsonParseError::NoError && document.isObject())
-            next = configuredLanguage(document.object());
+        if (error.error == QJsonParseError::NoError && document.isObject()) {
+            if (retained) {
+                if (!retainedLanguage(document, &next)) {
+                    m_error = QStringLiteral("Invalid Clipper settings; repair the saved configuration.");
+                    watchSettings();
+                    return;
+                }
+            } else next = configuredLanguage(document.object());
+        } else if (retained) {
+            m_error = QStringLiteral("Invalid Clipper settings; repair the saved configuration.");
+            watchSettings();
+            return;
+        }
+    } else if (retained) {
+        m_error = QStringLiteral("Could not read Clipper settings; check configuration permissions.");
+        watchSettings();
+        return;
     }
     const QString resolved = next == QStringLiteral("system") ? systemLanguage() : next;
     watchSettings();
