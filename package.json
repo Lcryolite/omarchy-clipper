@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:extension": "esbuild extension/src/background.ts extension/src/content.ts extension/src/popup.ts --bundle --format=iife --platform=browser --target=chrome120 --outdir=extension/dist",
+    "build:extension": "esbuild extension/src/background.ts extension/src/content.ts extension/src/popup.ts --bundle --format=iife --platform=browser --target=chrome120 --outdir=extension/dist && cp extension/manifest.json.in extension/manifest.json",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
