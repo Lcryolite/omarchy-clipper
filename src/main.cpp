@@ -12,6 +12,7 @@
 #include <QtWebEngineQuick>
 #include <cstdio>
 #include <memory>
+#include <functional>
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
@@ -47,6 +48,7 @@ QJsonValue nativeMetadata(QJsonValue value) {
     return object;
 }
 QByteArray encode(const QJsonObject &value) { return QJsonDocument(value).toJson(QJsonDocument::Compact); }
+QJsonObject failure(const QString &message) { return {{"ok", false}, {"error", message}}; }
 bool readExact(char *out, size_t length) {
     size_t count = 0;
     while (count < length) {
@@ -55,6 +57,22 @@ bool readExact(char *out, size_t length) {
         count += read;
     }
     return true;
+}
+int runNativeLoop(const std::function<QJsonObject(const QJsonObject &)> &dispatch) {
+    quint32 length;
+    while (readExact(reinterpret_cast<char *>(&length), sizeof length)) {
+        if (length == 0 || length > 24 * 1024 * 1024) return 2;
+        QByteArray input(length, '\0');
+        if (!readExact(input.data(), length)) return 2;
+        auto output = encode(nativeMetadata(dispatch(decode(input))).toObject());
+        if (output.size() > 1024 * 1024)
+            output = encode({{"ok", false}, {"error", "Native response is too large"}});
+        length = output.size();
+        if (std::fwrite(&length, sizeof length, 1, stdout) != 1
+            || std::fwrite(output.data(), 1, output.size(), stdout) != size_t(output.size())) return 2;
+        std::fflush(stdout);
+    }
+    return 0;
 }
 }
 
@@ -117,24 +135,28 @@ int main(int argc, char **argv) {
         if (expected.isEmpty() || originArg >= args.size() || args[originArg] != expected || !expected.startsWith("chrome-extension://")) {
             std::fputs("Browser origin is not allowed\n", stderr); return 2;
         }
+        try {
+            Application app(root, argument(args, "--open"));
+            return runNativeLoop([&app](const QJsonObject &request) {
+                return app.dispatch(request, true);
+            });
+        } catch (const QString &error) {
+            return runNativeLoop([error](const QJsonObject &request) {
+                return Application::nativeOperationAllowed(request)
+                    ? failure(error)
+                    : failure("Operation is not available to browser clients");
+            });
+        } catch (const std::exception &error) {
+            const QString message = QString::fromLocal8Bit(error.what());
+            return runNativeLoop([message](const QJsonObject &request) {
+                return Application::nativeOperationAllowed(request)
+                    ? failure(message)
+                    : failure("Operation is not available to browser clients");
+            });
+        }
     }
     try {
         Application app(root, argument(args, "--open"));
-        if (args.contains("--native")) {
-            quint32 length;
-            while (readExact(reinterpret_cast<char *>(&length), sizeof length)) {
-                if (length == 0 || length > 24 * 1024 * 1024) return 2;
-                QByteArray input(length, '\0');
-                if (!readExact(input.data(), length)) return 2;
-                auto response = app.dispatch(decode(input), true);
-                auto output = encode(nativeMetadata(response).toObject());
-                if (output.size() > 1024 * 1024) output = encode({{"ok", false}, {"error", "Native response is too large"}});
-                length = output.size();
-                if (std::fwrite(&length, sizeof length, 1, stdout) != 1 || std::fwrite(output.data(), 1, output.size(), stdout) != size_t(output.size())) return 2;
-                std::fflush(stdout);
-            }
-            return 0;
-        }
         if (args.contains("--request")) {
             QFile input;
             if (!input.open(stdin, QIODevice::ReadOnly)) return 2;

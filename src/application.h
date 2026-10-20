@@ -19,6 +19,7 @@ public:
     Q_INVOKABLE QString localizedMessage(const QString &message) const
         { return localizedUserMessage(message); }
     QJsonObject dispatch(const QJsonObject &value, bool native = false);
+    static bool nativeOperationAllowed(const QJsonObject &value);
     QString initialClipId() const { return m_clipId; }
     QString dataDir() const { return m_root; }
     QString language() const { return m_language.language(); }

@@ -180,8 +180,8 @@ QString Application::readerUrl(const QString &id) const {
 
 QJsonObject Application::dispatch(const QJsonObject &value, bool native) {
     const QString op = value.value("op").toString();
-    static const QSet<QString> nativeOps{"capture.check", "capture.begin", "capture.finish", "capture.abort", "capture.pending", "capture.mixed", "capture.region", "asset.import", "clip.open", "clip.restore", "settings.get"};
-    if (native && !nativeOps.contains(op)) return failure("Operation is not available to browser clients");
+    if (native && !nativeOperationAllowed(value))
+        return failure("Operation is not available to browser clients");
     try {
         if (op == "settings.get") {
             if (!m_language.error().isEmpty()) return failure(m_language.error());
@@ -270,6 +270,12 @@ QJsonObject Application::dispatch(const QJsonObject &value, bool native) {
         return m_collection.dispatch(value);
     } catch (const QString &error) { return failure(error); }
     catch (const std::exception &) { return failure("The operation could not be completed"); }
+}
+
+bool Application::nativeOperationAllowed(const QJsonObject &value)
+{
+    static const QSet<QString> nativeOps{"capture.check", "capture.begin", "capture.finish", "capture.abort", "capture.pending", "capture.mixed", "capture.region", "asset.import", "clip.open", "clip.restore", "settings.get"};
+    return nativeOps.contains(value.value("op").toString());
 }
 
 void registerReaderScheme() {

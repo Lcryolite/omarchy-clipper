@@ -20,7 +20,13 @@
 #include <QUrl>
 #include <QUuid>
 
+#include <cerrno>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -157,6 +163,380 @@ void validateSourceUrl(const QString &sourceUrl)
           "sourceUrl must be an absolute HTTP(S) URL");
 }
 
+class FileDescriptor final
+{
+public:
+    explicit FileDescriptor(int value = -1) : value(value) {}
+    ~FileDescriptor() { if (value >= 0) ::close(value); }
+    FileDescriptor(const FileDescriptor &) = delete;
+    FileDescriptor &operator=(const FileDescriptor &) = delete;
+    FileDescriptor(FileDescriptor &&other) noexcept : value(other.value) { other.value = -1; }
+    FileDescriptor &operator=(FileDescriptor &&other) noexcept
+    {
+        if (this != &other) {
+            if (value >= 0)
+                ::close(value);
+            value = other.value;
+            other.value = -1;
+        }
+        return *this;
+    }
+    int get() const { return value; }
+private:
+    int value;
+};
+
+QString storageError(const QString &message)
+{
+    return "Collection storage is unsafe: " + message;
+}
+
+[[noreturn]] void failErrno(const QString &action)
+{
+    const int error = errno;
+    fail(storageError(action + ": " + QString::fromLocal8Bit(std::strerror(error))));
+}
+
+void checkOwned(const struct stat &status, const QString &name)
+{
+    check(status.st_uid == ::geteuid(), storageError(name + " is not owned by the current user"));
+}
+
+void verifyMode(const struct stat &status, mode_t wanted, const QString &name)
+{
+    check((status.st_mode & 0777) == wanted,
+          storageError(name + QString(" permissions could not be restricted to %1")
+                                      .arg(wanted, 4, 8, QLatin1Char('0'))));
+}
+
+void secureDirectory(int directoryFd, const QString &displayPath)
+{
+    struct stat directoryStatus {};
+    if (::fstat(directoryFd, &directoryStatus) != 0)
+        failErrno("could not inspect " + displayPath);
+    check(S_ISDIR(directoryStatus.st_mode), storageError(displayPath + " is not a directory"));
+    checkOwned(directoryStatus, displayPath);
+    if (::fchmod(directoryFd, 0700) != 0)
+        failErrno("could not protect " + displayPath);
+    if (::fstat(directoryFd, &directoryStatus) != 0)
+        failErrno("could not verify " + displayPath);
+    verifyMode(directoryStatus, 0700, displayPath);
+}
+
+void secureDirectoryTree(int directoryFd, const QString &displayPath)
+{
+    secureDirectory(directoryFd, displayPath);
+
+    const int scanFd = ::openat(directoryFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (scanFd < 0)
+        failErrno("could not scan " + displayPath);
+    DIR *directory = ::fdopendir(scanFd);
+    if (!directory) {
+        ::close(scanFd);
+        failErrno("could not scan " + displayPath);
+    }
+
+    while (dirent *entry = ::readdir(directory)) {
+        const QByteArray name(entry->d_name);
+        if (name == "." || name == "..")
+            continue;
+        const QString childDisplay = displayPath + "/" + QString::fromLocal8Bit(name);
+        struct stat before {};
+        if (::fstatat(directoryFd, name.constData(), &before, AT_SYMLINK_NOFOLLOW) != 0) {
+            const int error = errno;
+            ::closedir(directory);
+            errno = error;
+            failErrno("could not inspect " + childDisplay);
+        }
+        checkOwned(before, childDisplay);
+        if (S_ISLNK(before.st_mode)) {
+            ::closedir(directory);
+            fail(storageError(childDisplay + " is a symbolic link"));
+        }
+        if (S_ISDIR(before.st_mode)) {
+            FileDescriptor child(::openat(directoryFd, name.constData(),
+                                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            if (child.get() < 0) {
+                const int error = errno;
+                ::closedir(directory);
+                errno = error;
+                failErrno("could not open " + childDisplay);
+            }
+            secureDirectoryTree(child.get(), childDisplay);
+            continue;
+        }
+        if (!S_ISREG(before.st_mode)) {
+            ::closedir(directory);
+            fail(storageError(childDisplay + " is not a regular file or directory"));
+        }
+        if (before.st_nlink != 1) {
+            ::closedir(directory);
+            fail(storageError(childDisplay + " has an unsafe hard-link alias"));
+        }
+        if (::fchmodat(directoryFd, name.constData(), 0600, 0) != 0) {
+            const int error = errno;
+            ::closedir(directory);
+            errno = error;
+            failErrno("could not protect " + childDisplay);
+        }
+        struct stat after {};
+        if (::fstatat(directoryFd, name.constData(), &after, AT_SYMLINK_NOFOLLOW) != 0) {
+            const int error = errno;
+            ::closedir(directory);
+            errno = error;
+            failErrno("could not verify " + childDisplay);
+        }
+        if (before.st_dev != after.st_dev || before.st_ino != after.st_ino) {
+            ::closedir(directory);
+            fail(storageError(childDisplay + " changed while it was being protected"));
+        }
+        checkOwned(after, childDisplay);
+        check(S_ISREG(after.st_mode) && after.st_nlink == 1,
+              storageError(childDisplay + " changed to an unsafe file"));
+        verifyMode(after, 0600, childDisplay);
+    }
+    ::closedir(directory);
+}
+
+void createMissingDirectories(const QString &absolutePath)
+{
+    QString current;
+    for (const QString &component : absolutePath.split('/', Qt::SkipEmptyParts)) {
+        current += "/" + component;
+        const QByteArray encoded = QFile::encodeName(current);
+        if (::mkdir(encoded.constData(), 0700) != 0 && errno != EEXIST)
+            failErrno("could not create " + current);
+    }
+}
+
+void validateParentChain(const QString &absolutePath)
+{
+    struct stat parent {};
+    if (::stat("/", &parent) != 0)
+        failErrno("could not inspect collection ancestors");
+    QString current;
+    const QStringList components = absolutePath.split('/', Qt::SkipEmptyParts);
+    for (int index = 0; index + 1 < components.size(); ++index) {
+        current += "/" + components.at(index);
+        const QByteArray encoded = QFile::encodeName(current);
+        struct stat child {};
+        if (::lstat(encoded.constData(), &child) != 0) {
+            if (errno == ENOENT)
+                break;
+            failErrno("could not inspect " + current);
+        }
+        if ((parent.st_mode & 0022) != 0) {
+            const bool stickyOwnedEntry = (parent.st_mode & S_ISVTX) != 0
+                && child.st_uid == ::geteuid();
+            check(stickyOwnedEntry,
+                  storageError(current + " can be replaced through a writable ancestor"));
+        }
+        struct stat followed {};
+        if (::stat(encoded.constData(), &followed) != 0)
+            failErrno("could not inspect " + current);
+        check(S_ISDIR(followed.st_mode), storageError(current + " is not a directory"));
+        parent = followed;
+    }
+    if ((parent.st_mode & 0022) != 0)
+        check((parent.st_mode & S_ISVTX) != 0,
+              storageError(absolutePath + " can be replaced through a writable parent"));
+}
+
+void validateCollectionAncestors(const QString &rootPath)
+{
+    validateParentChain(rootPath);
+    QDir existingParent = QFileInfo(rootPath).dir();
+    while (!existingParent.exists() && !existingParent.isRoot())
+        existingParent.cdUp();
+    const QString canonicalParent = existingParent.canonicalPath();
+    check(!canonicalParent.isEmpty(), storageError("collection parent could not be resolved"));
+    validateParentChain(canonicalParent + "/collection-path-check");
+}
+
+void validateCollectionContents(int rootFd, const QString &rootPath)
+{
+    const int scanFd = ::openat(rootFd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (scanFd < 0)
+        failErrno("could not inspect " + rootPath);
+    DIR *directory = ::fdopendir(scanFd);
+    if (!directory) {
+        ::close(scanFd);
+        failErrno("could not inspect " + rootPath);
+    }
+    bool hasInstallState = false;
+    bool hasUi = false;
+    bool hasExtension = false;
+    while (dirent *entry = ::readdir(directory)) {
+        const QByteArray name(entry->d_name);
+        if (name == "." || name == "..")
+            continue;
+        const bool managed = name == "assets" || name == "collection.sqlite3"
+            || name == "collection.sqlite3-wal" || name == "collection.sqlite3-shm"
+            || name == "collection.sqlite3-journal";
+        const bool installState = name == ".install-state.json";
+        const bool ui = name == "ui";
+        const bool extension = name == "extension";
+        if (!managed && !installState && !ui && !extension) {
+            const QString unexpected = QString::fromLocal8Bit(name);
+            ::closedir(directory);
+            fail(storageError(rootPath + " contains unrelated entry " + unexpected));
+        }
+        if (installState || ui || extension) {
+            struct stat status {};
+            if (::fstatat(rootFd, name.constData(), &status, AT_SYMLINK_NOFOLLOW) != 0) {
+                const int error = errno;
+                ::closedir(directory);
+                errno = error;
+                failErrno("could not inspect " + rootPath + "/" + QString::fromLocal8Bit(name));
+            }
+            checkOwned(status, rootPath + "/" + QString::fromLocal8Bit(name));
+            check((installState && S_ISREG(status.st_mode))
+                      || ((ui || extension) && S_ISDIR(status.st_mode)),
+                  storageError(rootPath + "/" + QString::fromLocal8Bit(name)
+                               + " is not a recognized Clipper install resource"));
+            hasInstallState = hasInstallState || installState;
+            hasUi = hasUi || ui;
+            hasExtension = hasExtension || extension;
+        }
+    }
+    ::closedir(directory);
+    check((!hasUi && !hasExtension) || hasInstallState,
+          storageError(rootPath + " contains install resources without Clipper install state"));
+}
+
+FileDescriptor secureCollectionRoot(const QString &rootPath)
+{
+    check(rootPath != "/" && QDir::cleanPath(rootPath) != QDir::cleanPath(QDir::homePath()),
+          storageError(rootPath + " is too broad to use as a collection directory"));
+    validateCollectionAncestors(rootPath);
+    createMissingDirectories(rootPath);
+    validateCollectionAncestors(rootPath);
+
+    const QByteArray encoded = QFile::encodeName(rootPath);
+    struct stat before {};
+    if (::lstat(encoded.constData(), &before) != 0)
+        failErrno("could not inspect " + rootPath);
+    check(!S_ISLNK(before.st_mode), storageError(rootPath + " is a symbolic link"));
+    check(S_ISDIR(before.st_mode), storageError(rootPath + " is not a directory"));
+    checkOwned(before, rootPath);
+
+    FileDescriptor rootFd(::open(encoded.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (rootFd.get() < 0) {
+        check((before.st_mode & 0077) == 0,
+              storageError(rootPath + " cannot be inspected without changing a shared directory"));
+        if (::chmod(encoded.constData(), 0700) != 0)
+            failErrno("could not protect " + rootPath);
+        rootFd = FileDescriptor(::open(encoded.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    }
+    if (rootFd.get() < 0)
+        failErrno("could not open " + rootPath);
+    struct stat opened {};
+    if (::fstat(rootFd.get(), &opened) != 0)
+        failErrno("could not verify " + rootPath);
+    check(opened.st_dev == before.st_dev && opened.st_ino == before.st_ino,
+          storageError(rootPath + " changed while it was being opened"));
+    validateCollectionContents(rootFd.get(), rootPath);
+    secureDirectory(rootFd.get(), rootPath);
+    return rootFd;
+}
+
+void ensurePrivateDirectory(int parentFd, const char *name, const QString &displayPath)
+{
+    if (::mkdirat(parentFd, name, 0700) != 0 && errno != EEXIST)
+        failErrno("could not create " + displayPath);
+    struct stat status {};
+    if (::fstatat(parentFd, name, &status, AT_SYMLINK_NOFOLLOW) != 0)
+        failErrno("could not inspect " + displayPath);
+    check(!S_ISLNK(status.st_mode), storageError(displayPath + " is a symbolic link"));
+    check(S_ISDIR(status.st_mode), storageError(displayPath + " is not a directory"));
+    checkOwned(status, displayPath);
+    if (::fchmodat(parentFd, name, 0700, 0) != 0)
+        failErrno("could not protect " + displayPath);
+    struct stat protectedStatus {};
+    if (::fstatat(parentFd, name, &protectedStatus, AT_SYMLINK_NOFOLLOW) != 0)
+        failErrno("could not verify " + displayPath);
+    check(status.st_dev == protectedStatus.st_dev && status.st_ino == protectedStatus.st_ino,
+          storageError(displayPath + " changed while it was being protected"));
+    checkOwned(protectedStatus, displayPath);
+    check(S_ISDIR(protectedStatus.st_mode),
+          storageError(displayPath + " changed to an unsafe file"));
+    verifyMode(protectedStatus, 0700, displayPath);
+    FileDescriptor directory(::openat(parentFd, name,
+                                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (directory.get() < 0)
+        failErrno("could not open " + displayPath);
+    secureDirectoryTree(directory.get(), displayPath);
+}
+
+bool secureExistingFile(int parentFd, const char *name, const QString &displayPath,
+                        bool mayDisappear = false);
+
+void ensurePrivateFile(int parentFd, const char *name, const QString &displayPath)
+{
+    if (secureExistingFile(parentFd, name, displayPath))
+        return;
+    FileDescriptor file(::openat(parentFd, name,
+                                 O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    if (file.get() < 0 && errno == EEXIST) {
+        check(secureExistingFile(parentFd, name, displayPath),
+              storageError(displayPath + " disappeared while it was being protected"));
+        return;
+    }
+    if (file.get() < 0)
+        failErrno("could not open " + displayPath);
+    struct stat status {};
+    if (::fstat(file.get(), &status) != 0)
+        failErrno("could not inspect " + displayPath);
+    checkOwned(status, displayPath);
+    check(S_ISREG(status.st_mode), storageError(displayPath + " is not a regular file"));
+    check(status.st_nlink == 1, storageError(displayPath + " has an unsafe hard-link alias"));
+    if (::fchmod(file.get(), 0600) != 0)
+        failErrno("could not protect " + displayPath);
+    if (::fstat(file.get(), &status) != 0)
+        failErrno("could not verify " + displayPath);
+    verifyMode(status, 0600, displayPath);
+}
+
+bool secureExistingFile(int parentFd, const char *name, const QString &displayPath,
+                        bool mayDisappear)
+{
+    struct stat before {};
+    if (::fstatat(parentFd, name, &before, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT)
+            return false;
+        failErrno("could not inspect " + displayPath);
+    }
+    checkOwned(before, displayPath);
+    check(S_ISREG(before.st_mode), storageError(displayPath + " is not a regular file"));
+    check(before.st_nlink == 1, storageError(displayPath + " has an unsafe hard-link alias"));
+    if (::fchmodat(parentFd, name, 0600, 0) != 0) {
+        if (mayDisappear && errno == ENOENT)
+            return false;
+        failErrno("could not protect " + displayPath);
+    }
+    struct stat after {};
+    if (::fstatat(parentFd, name, &after, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (mayDisappear && errno == ENOENT)
+            return false;
+        failErrno("could not verify " + displayPath);
+    }
+    check(before.st_dev == after.st_dev && before.st_ino == after.st_ino,
+          storageError(displayPath + " changed while it was being protected"));
+    checkOwned(after, displayPath);
+    check(S_ISREG(after.st_mode) && after.st_nlink == 1,
+          storageError(displayPath + " changed to an unsafe file"));
+    verifyMode(after, 0600, displayPath);
+    return true;
+}
+
+void secureSqliteFiles(int rootFd, const QString &rootPath)
+{
+    secureExistingFile(rootFd, "collection.sqlite3", rootPath + "/collection.sqlite3");
+    secureExistingFile(rootFd, "collection.sqlite3-wal", rootPath + "/collection.sqlite3-wal", true);
+    secureExistingFile(rootFd, "collection.sqlite3-shm", rootPath + "/collection.sqlite3-shm", true);
+    secureExistingFile(rootFd, "collection.sqlite3-journal", rootPath + "/collection.sqlite3-journal", true);
+}
+
 } // namespace
 
 class Collection::Impl
@@ -167,8 +547,10 @@ public:
         , assetsDir(root + "/assets")
         , connectionName("clipper-" + newId())
     {
-        check(QDir().mkpath(root), "Could not create the collection directory");
-        check(QDir().mkpath(assetsDir), "Could not create the asset directory");
+        FileDescriptor rootFd = secureCollectionRoot(root);
+        ensurePrivateDirectory(rootFd.get(), "assets", assetsDir);
+        ensurePrivateFile(rootFd.get(), "collection.sqlite3", root + "/collection.sqlite3");
+        secureSqliteFiles(rootFd.get(), root);
         db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
         db.setDatabaseName(root + "/collection.sqlite3");
         db.setConnectOptions("QSQLITE_BUSY_TIMEOUT=3000");
@@ -181,6 +563,7 @@ public:
         executeWithBusyRetry(pragmas, "Could not enable concurrent collection storage");
         pragmas.finish();
         createSchema();
+        secureSqliteFiles(rootFd.get(), root);
     }
 
     ~Impl()
@@ -521,7 +904,9 @@ QJsonObject Collection::dispatch(const QJsonObject &request)
             const QString id = newId();
             const QString filename = id + "." + extension;
             QSaveFile file(d->assetsDir + "/" + filename);
-            check(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit(),
+            check(file.open(QIODevice::WriteOnly)
+                      && file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)
+                      && file.write(bytes) == bytes.size() && file.commit(),
                   "Could not store the asset");
             QSqlQuery query(d->db);
             query.prepare("INSERT INTO assets(id,mime,name,filename,created_at) VALUES(?,?,?,?,?)");
