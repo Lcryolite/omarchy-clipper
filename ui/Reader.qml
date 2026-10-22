@@ -369,6 +369,12 @@ Controls.ApplicationWindow {
         foreground: foregroundColor; borderColor: borderColor; hoverBackground: accentColor; fontFamily: themeFont
         onClicked: window.trashClip()
       }
+      ActionButton {
+        objectName: "closeReaderButton"
+        text: qsTr("Close")
+        foreground: foregroundColor; borderColor: borderColor; hoverBackground: accentColor; fontFamily: themeFont
+        onClicked: window.requestClose()
+      }
     }
   }
 
@@ -416,7 +422,7 @@ Controls.ApplicationWindow {
             maximumLineCount: 1
           }
           PlainText {
-            text: window.clip && window.clip.createdAt ? String(window.clip.createdAt) : ""
+            text: window.clip && window.clip.createdAt ? Qt.formatDateTime(new Date(window.clip.createdAt), "yyyy-MM-dd hh:mm:ss") : ""
             color: mutedColor
             font.family: themeFont
             font.pixelSize: 12

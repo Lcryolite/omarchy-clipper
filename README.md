@@ -337,7 +337,7 @@ test "$(build/clipper --version)" = "0.1.0"
 test "$(build/clipper-native --version)" = "0.1.0"
 ```
 
-Use a temporary `--data-dir` for behavioral experiments. Do not test destructive operations against your normal collection. The public source package does not bundle the development repository's test suite.
+Use a temporary `--data-dir` for behavioral experiments. Do not test destructive operations against your normal collection. The public source package includes smoke tests, not the full development repository's test suite.
 
 ## Licensing
 

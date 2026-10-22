@@ -122,6 +122,13 @@ int main(int argc, char **argv) {
         return 2;
     }
     const bool gui = args.contains("--open");
+    const QByteArray platform = qgetenv("QT_QPA_PLATFORM");
+    const bool wayland = platform.startsWith("wayland")
+        || (platform.isEmpty() && !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"));
+    // Qt WebEngine can lose its threaded scene-graph surface when Wayland
+    // hides a workspace. Keep the Reader rendering on the GUI thread instead.
+    if (gui && wayland && !qEnvironmentVariableIsSet("QSG_RENDER_LOOP"))
+        qputenv("QSG_RENDER_LOOP", "basic");
     if (gui) { registerReaderScheme(); QtWebEngineQuick::initialize(); }
     std::unique_ptr<QCoreApplication> qt;
     if (gui) qt = std::make_unique<QGuiApplication>(argc, argv);
