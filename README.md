@@ -337,7 +337,12 @@ test "$(build/clipper --version)" = "0.1.0"
 test "$(build/clipper-native --version)" = "0.1.0"
 ```
 
-Use a temporary `--data-dir` for behavioral experiments. Do not test destructive operations against your normal collection. The public source package does not bundle the development repository's test suite.
+CI checks extension types and packaging, builds both C++ programs on Arch Linux,
+and runs protocol smoke tests with temporary synthetic collections. After building,
+run them locally with `python3 -m unittest discover -s tests -p 'test_*.py' -v`.
+These checks do not replace real Wayland workspace and Reader interaction tests.
+
+Use a temporary `--data-dir` for behavioral experiments. Do not test destructive operations against your normal collection. The public source package includes smoke tests, not the full development repository's test suite.
 
 ## Licensing
 

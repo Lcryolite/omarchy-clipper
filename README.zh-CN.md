@@ -262,7 +262,9 @@ test "$(build/clipper --version)" = "0.1.0"
 test "$(build/clipper-native --version)" = "0.1.0"
 ```
 
-行为实验请使用临时 `--data-dir`，不要对日常收藏执行破坏性测试。公开源码包不包含开发仓库的测试套件。
+CI 会检查扩展类型与打包、在 Arch Linux 上构建两个 C++ 程序，并使用临时合成收藏运行协议冒烟测试。构建后可运行 `python3 -m unittest discover -s tests -p 'test_*.py' -v`。这些检查不能替代真实 Wayland 工作区和 Reader 交互测试。
+
+行为实验请使用临时 `--data-dir`，不要对日常收藏执行破坏性测试。公开源码包包含冒烟测试，但不包含开发仓库的完整测试套件。
 
 ## 许可证
 
