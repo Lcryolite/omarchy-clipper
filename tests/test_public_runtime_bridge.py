@@ -52,7 +52,7 @@ def rust_request(env: dict[str, str], data_dir: Path, value: dict,
 def installed_rust_probe(root: Path) -> tuple[Path, Path, Path]:
     prefix = root / "prefix"
     binary = prefix / "bin/clipper"
-    lock_path = prefix / "share/omarchy-clipper/backend.lock"
+    lock_path = prefix / "share/.omarchy-clipper-backend.lock"
     probe = prefix / "libexec/omarchy-clipper/clipper-reader"
     binary.parent.mkdir(parents=True)
     lock_path.parent.mkdir(parents=True)
@@ -134,6 +134,63 @@ class PublicRuntimeBridgeTests(unittest.TestCase):
                 "error": "Invalid Clipper settings; repair the saved configuration.",
             })
 
+    def test_installed_rust_rejects_unsafe_lifetime_lock_paths(self):
+        for unsafe in ("writable-parent", "permissive-lock", "linked-lock", "fifo-lock"):
+            with self.subTest(unsafe=unsafe), tempfile.TemporaryDirectory(
+                    prefix="clipper-public-rust-lock-security-") as temporary:
+                root = Path(temporary)
+                env = environment(root)
+                binary, lock_path, _ = installed_rust_probe(root)
+                if unsafe == "writable-parent":
+                    lock_path.parent.chmod(0o777)
+                elif unsafe == "permissive-lock":
+                    lock_path.chmod(0o644)
+                elif unsafe == "linked-lock":
+                    target = root / "lock-target"
+                    target.touch(mode=0o600)
+                    target.chmod(0o600)
+                    lock_path.unlink()
+                    os.link(target, lock_path)
+                else:
+                    lock_path.unlink()
+                    os.mkfifo(lock_path, mode=0o600)
+
+                process = subprocess.run(
+                    [str(binary), "--request", "--data-dir", str(root / "collection")],
+                    input=b'{"op":"settings.get"}',
+                    capture_output=True,
+                    env=env,
+                    timeout=20,
+                    check=False,
+                )
+
+                self.assertEqual(process.returncode, 2)
+                self.assertIn(b"unsafe", process.stderr)
+                self.assertFalse((root / "collection").exists())
+
+    def test_installed_reader_rejects_unsafe_lifetime_lock_parent(self):
+        with tempfile.TemporaryDirectory(
+                prefix="clipper-public-reader-lock-security-") as temporary:
+            root = Path(temporary)
+            env = environment(root)
+            binary, lock_path, reader = installed_rust_probe(root)
+            shutil.copy2(READER, reader)
+            lock_path.parent.chmod(0o777)
+
+            process = subprocess.run(
+                [str(reader), "--request", "--backend-bin", str(binary),
+                 "--data-dir", str(root / "collection")],
+                input=b'{"op":"settings.get"}',
+                capture_output=True,
+                env=env,
+                timeout=20,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 2)
+            self.assertIn(b"unsafe", process.stderr)
+            self.assertFalse((root / "collection").exists())
+
     def test_reader_routes_mixed_clip_to_native_window_with_default_rust_backend(self):
         with tempfile.TemporaryDirectory(prefix="clipper-public-mixed-route-") as temporary:
             root = Path(temporary)
@@ -148,7 +205,7 @@ class PublicRuntimeBridgeTests(unittest.TestCase):
             native.parent.mkdir(parents=True)
             backend.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(READER, reader)
-            lock = prefix / "share/omarchy-clipper/backend.lock"
+            lock = prefix / "share/.omarchy-clipper-backend.lock"
             lock.parent.mkdir(parents=True)
             lock.touch(mode=0o600)
             lock.chmod(0o600)

@@ -209,7 +209,7 @@ class PublicBackendInstallTests(unittest.TestCase):
         reader = self.prefix / "libexec/omarchy-clipper/clipper-reader"
         helper = self.prefix / "libexec/omarchy-clipper/clipper-helper"
         native = self.prefix / "bin/clipper-native"
-        lock_path = self.prefix / "share/omarchy-clipper/backend.lock"
+        lock_path = self.prefix / "share/.omarchy-clipper-backend.lock"
         self.assertEqual(subprocess.run([binary], text=True, capture_output=True, check=True).stdout, "rust\n")
         self.assertEqual(subprocess.run([reader], text=True, capture_output=True, check=True).stdout, "reader\n")
         self.assertTrue(helper.is_file())
@@ -257,10 +257,81 @@ class PublicBackendInstallTests(unittest.TestCase):
             self.assertEqual(reopened.execute("SELECT COUNT(*) FROM clips").fetchone()[0], 2)
         self.assertEqual(asset.read_bytes(), b"current asset")
 
+    def test_failed_first_upgrade_restores_old_layout_without_locking_collection(self):
+        self._stage_old_public_install()
+        collection = self.prefix / "share/omarchy-clipper"
+        database = collection / "collection.sqlite3"
+        database.write_bytes(b"old public collection")
+        before = self.installed_files()
+
+        previous_lifecycle = sys.modules.pop("lifecycle", None)
+        sys.path.insert(0, str(self.source / "scripts"))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "synthetic_first_upgrade", self.source / "scripts/install.py"
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            original_copy = module.copy_file
+            calls = 0
+
+            def fail_second_copy(source, destination, mode=None):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("synthetic first-upgrade failure")
+                return original_copy(source, destination, mode)
+
+            module.copy_file = fail_second_copy
+            arguments = [
+                str(self.source / "scripts/install.py"),
+                "--prefix", str(self.prefix),
+                "--config-dir", str(self.config),
+                "--chromium-extension-id", EXTENSION_ID,
+            ]
+            environment = {"PATH": f"{self.tools}:{os.environ.get('PATH', '')}"}
+            with mock.patch.object(sys, "argv", arguments), mock.patch.dict(
+                os.environ, environment
+            ), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    module.main()
+        finally:
+            sys.path.pop(0)
+            sys.modules.pop("lifecycle", None)
+            if previous_lifecycle is not None:
+                sys.modules["lifecycle"] = previous_lifecycle
+
+        external_lock = self.prefix / "share/.omarchy-clipper-backend.lock"
+        after = self.installed_files()
+        self.assertEqual(
+            {key: value for key, value in after.items()
+             if key != ("prefix", "share/.omarchy-clipper-backend.lock")},
+            before,
+        )
+        self.assertTrue(external_lock.is_file())
+        self.assertFalse((collection / "backend.lock").exists())
+        self.assertEqual(database.read_bytes(), b"old public collection")
+        self.assertEqual(
+            subprocess.run(
+                [self.prefix / "bin/clipper"], text=True,
+                capture_output=True, check=True,
+            ).stdout,
+            "old-public\n",
+        )
+
     def test_unsafe_lifetime_lock_blocks_reinstall_without_changing_components(self):
         self.run_cli("install.py", "--chromium-extension-id", EXTENSION_ID)
-        lock = self.prefix / "share/omarchy-clipper/backend.lock"
+        lock = self.prefix / "share/.omarchy-clipper-backend.lock"
         before = self.installed_files()
+        share = self.prefix / "share"
+        share.chmod(0o777)
+        refused = self.run_cli(
+            "install.py", "--chromium-extension-id", EXTENSION_ID, check=False
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("lock parent must be", refused.stderr)
+        self.assertEqual(self.installed_files(), before)
+        share.chmod(0o755)
         lock.chmod(0o644)
         refused = self.run_cli(
             "install.py", "--chromium-extension-id", EXTENSION_ID, check=False
@@ -320,6 +391,30 @@ class PublicBackendInstallTests(unittest.TestCase):
                 sys.modules["lifecycle"] = previous_lifecycle
 
         self.assertEqual(self.installed_files(), before)
+
+    def test_uninstall_refuses_changed_component_before_any_deletion(self):
+        self.run_cli("install.py", "--chromium-extension-id", EXTENSION_ID)
+        helper = self.prefix / "libexec/omarchy-clipper/clipper-helper"
+        helper.write_bytes(helper.read_bytes() + b"\nchanged outside installer\n")
+        before = self.installed_files()
+
+        refused = self.run_cli("uninstall.py", check=False)
+
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("does not match recorded ownership", refused.stderr)
+        self.assertEqual(self.installed_files(), before)
+
+    def test_uninstall_treats_missing_recorded_component_as_already_removed(self):
+        self.run_cli("install.py", "--chromium-extension-id", EXTENSION_ID)
+        reader = self.prefix / "libexec/omarchy-clipper/clipper-reader"
+        reader.unlink()
+
+        self.run_cli("uninstall.py")
+
+        self.assertEqual(
+            set(self.installed_files()),
+            {("prefix", "share/.omarchy-clipper-backend.lock")},
+        )
 
     def test_failed_uninstall_restores_companions_without_touching_collection(self):
         self.run_cli("install.py", "--chromium-extension-id", EXTENSION_ID)

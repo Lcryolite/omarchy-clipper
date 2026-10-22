@@ -259,9 +259,10 @@ class RustCaptureTests(unittest.TestCase):
             helper = prefix / "libexec/omarchy-clipper/clipper-helper"
             executable.parent.mkdir(parents=True)
             helper.parent.mkdir(parents=True)
-            lock = prefix / "share/omarchy-clipper/backend.lock"
+            lock = prefix / "share/.omarchy-clipper-backend.lock"
             lock.parent.mkdir(parents=True)
             lock.touch()
+            lock.chmod(0o600)
             shutil.copy2(CANDIDATE, executable)
             shutil.copy2(HELPER, helper)
             environment = runtime_environment(root / "environment")

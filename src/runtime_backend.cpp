@@ -67,19 +67,31 @@ InstallationLifetimeLock::InstallationLifetimeLock()
     QString prefix;
     if (directory.dirName() == QStringLiteral("bin")
         && executable.fileName() == QStringLiteral("clipper-native")) {
-        prefix = directory.absoluteFilePath(QStringLiteral(".."));
+        prefix = QDir::cleanPath(directory.absoluteFilePath(QStringLiteral("..")));
     } else if (executable.fileName() == QStringLiteral("clipper-reader")
                && directory.dirName() == QStringLiteral("omarchy-clipper")) {
-        const QDir libexec(directory.absoluteFilePath(QStringLiteral("..")));
+        const QDir libexec(QDir::cleanPath(
+            directory.absoluteFilePath(QStringLiteral(".."))));
         if (libexec.dirName() == QStringLiteral("libexec"))
-            prefix = libexec.absoluteFilePath(QStringLiteral(".."));
+            prefix = QDir::cleanPath(libexec.absoluteFilePath(QStringLiteral("..")));
     }
     if (prefix.isEmpty())
         return;
 
-    const QString path = QDir(prefix).absoluteFilePath(
-        QStringLiteral("share/omarchy-clipper/backend.lock"));
-    m_descriptor = ::open(QFile::encodeName(path).constData(), O_RDONLY | O_NOFOLLOW);
+    const QString sharePath = QDir(prefix).absoluteFilePath(QStringLiteral("share"));
+    const int shareDescriptor = ::open(QFile::encodeName(sharePath).constData(),
+                                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat shareStatus {};
+    if (shareDescriptor < 0 || ::fstat(shareDescriptor, &shareStatus) != 0
+        || !S_ISDIR(shareStatus.st_mode) || shareStatus.st_uid != ::geteuid()
+        || (shareStatus.st_mode & 0022) != 0) {
+        if (shareDescriptor >= 0)
+            ::close(shareDescriptor);
+        throw std::runtime_error("The installation share directory is unsafe");
+    }
+    m_descriptor = ::openat(shareDescriptor, ".omarchy-clipper-backend.lock",
+                            O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    ::close(shareDescriptor);
     if (m_descriptor < 0)
         throw std::runtime_error(
             QStringLiteral("Could not open the installation lifetime lock: %1")

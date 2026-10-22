@@ -55,7 +55,7 @@ class InstalledBackendRoundtripTests(unittest.TestCase):
                 assetIds=[asset["id"]], sourceUrl="https://example.com/",
                 scope="selection",
             )
-            lock = data / "backend.lock"
+            lock = prefix / "share/.omarchy-clipper-backend.lock"
             if lock.exists():
                 lock.unlink()
 

@@ -7,9 +7,10 @@ mod store;
 
 use serde_json::{json, Value};
 use std::env;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
@@ -174,9 +175,50 @@ fn installation_lock() -> Result<Option<File>, String> {
     {
         return Ok(None);
     }
-    let path = default_install_path("share/omarchy-clipper/backend.lock")?;
-    let file = File::open(path)
-        .map_err(|error| format!("Could not open the installation lifetime lock: {error}"))?;
+    let share_path = default_install_path("share")?;
+    let share = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&share_path)
+        .map_err(|error| format!("Could not open the installation share directory: {error}"))?;
+    let share_metadata = share
+        .metadata()
+        .map_err(|error| format!("Could not inspect the installation share directory: {error}"))?;
+    if !share_metadata.is_dir()
+        || share_metadata.uid() != unsafe { libc::geteuid() }
+        || share_metadata.mode() & 0o022 != 0
+    {
+        return Err("The installation share directory is unsafe".to_owned());
+    }
+
+    let name = c".omarchy-clipper-backend.lock";
+    // SAFETY: share is a live directory descriptor and name is a static,
+    // NUL-terminated filename without path separators.
+    let descriptor = unsafe {
+        libc::openat(
+            share.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor == -1 {
+        return Err(format!(
+            "Could not open the installation lifetime lock: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not inspect the installation lifetime lock: {error}"))?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err("The installation lifetime lock is unsafe".to_owned());
+    }
     file.try_lock_shared()
         .map_err(|_| "The installation is being changed; retry after it completes".to_owned())?;
     Ok(Some(file))

@@ -325,7 +325,6 @@ fn validate_collection_contents(root: &File, display_root: &Path) -> Result<(), 
     let mut install_state = false;
     let mut ui = false;
     let mut extension = false;
-    let mut backend_lock = false;
     let root_access = descriptor_path(root);
     let entries = fs::read_dir(&root_access).map_err(|error| {
         storage_io_error(
@@ -353,7 +352,7 @@ fn validate_collection_contents(root: &File, display_root: &Path) -> Result<(), 
         );
         let recognized = matches!(
             name.to_str(),
-            Some(".install-state.json" | "ui" | "extension" | "backend.lock")
+            Some(".install-state.json" | "ui" | "extension")
         );
         if !managed && !recognized {
             return Err(storage_error(&format!(
@@ -375,12 +374,6 @@ fn validate_collection_contents(root: &File, display_root: &Path) -> Result<(), 
             })?;
             ensure_owned(&metadata, &display_root.join(&name))?;
             let valid = match name.to_str() {
-                Some("backend.lock") => {
-                    metadata.is_file()
-                        && !metadata.file_type().is_symlink()
-                        && metadata.nlink() == 1
-                        && metadata.mode() & 0o777 == 0o600
-                }
                 Some(".install-state.json") => {
                     metadata.is_file() && !metadata.file_type().is_symlink()
                 }
@@ -397,10 +390,9 @@ fn validate_collection_contents(root: &File, display_root: &Path) -> Result<(), 
             install_state |= name == OsStr::new(".install-state.json");
             ui |= name == OsStr::new("ui");
             extension |= name == OsStr::new("extension");
-            backend_lock |= name == OsStr::new("backend.lock");
         }
     }
-    if (ui || extension || backend_lock) && !install_state {
+    if (ui || extension) && !install_state {
         return Err(storage_error(&format!(
             "{} contains install resources without Clipper install state",
             display_root.display()

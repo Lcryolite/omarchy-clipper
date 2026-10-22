@@ -13,7 +13,7 @@ import stat
 
 HOST_NAME = "com.omarchy.clipper"
 STATE_NAME = ".install-state.json"
-BACKEND_LOCK_NAME = "backend.lock"
+BACKEND_LOCK_NAME = ".omarchy-clipper-backend.lock"
 BROWSERS = {
     "chromium": ("chromium", "omarchy-clipper-host-chromium"),
     "brave": ("BraveSoftware/Brave-Origin-Nightly", "omarchy-clipper-host-brave"),
@@ -31,23 +31,48 @@ class LifecycleError(Exception):
 
 def acquire_backend_lock(prefix, *, create):
     """Hold the installed backend lifetime lock exclusively during mutation."""
-    lock_path = absolute(prefix) / "share/omarchy-clipper" / BACKEND_LOCK_NAME
+    lock_path = absolute(prefix) / "share" / BACKEND_LOCK_NAME
     ensure_no_symlinks(lock_path)
-    if not create and not lock_path.exists():
-        return None
     if create:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         ensure_no_symlinks(lock_path)
 
-    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
-    if create:
-        flags |= os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0)
+    parent_flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(lock_path, flags, 0o600)
+        parent_descriptor = os.open(lock_path.parent, parent_flags)
     except OSError as error:
-        raise LifecycleError(f"cannot open backend lifetime lock: {lock_path}") from error
+        if not create and error.errno == errno.ENOENT:
+            return None
+        raise LifecycleError(
+            f"cannot open backend lifetime lock parent: {lock_path.parent}"
+        ) from error
+
+    try:
+        parent_status = os.fstat(parent_descriptor)
+        if (not stat.S_ISDIR(parent_status.st_mode)
+                or parent_status.st_uid != os.getuid()
+                or stat.S_IMODE(parent_status.st_mode) & 0o022):
+            raise LifecycleError(
+                f"backend lifetime lock parent must be a user-owned directory that is not "
+                f"group/world-writable: "
+                f"{lock_path.parent}"
+            )
+
+        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        if create:
+            flags |= os.O_CREAT
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(BACKEND_LOCK_NAME, flags, 0o600,
+                                 dir_fd=parent_descriptor)
+        except OSError as error:
+            if not create and error.errno == errno.ENOENT:
+                return None
+            raise LifecycleError(f"cannot open backend lifetime lock: {lock_path}") from error
+    finally:
+        os.close(parent_descriptor)
 
     lock = os.fdopen(descriptor, "r+b", buffering=0)
     try:

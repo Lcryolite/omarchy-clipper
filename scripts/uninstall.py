@@ -274,11 +274,23 @@ def main():
                 if git_managed_plugin and path.is_relative_to(plugin):
                     continue
                 validate_existing_file(path)
-                if (
-                    path.is_file()
-                    and file_digest(path) == record["sha256"]
-                ):
-                    owned.append(path)
+                if not path.exists():
+                    continue
+                try:
+                    digest = file_digest(path)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise UninstallError(
+                        f"installed file could not be verified; installed files were not changed: "
+                        f"{path}"
+                    ) from error
+                if digest != record["sha256"]:
+                    raise UninstallError(
+                        f"installed file does not match recorded ownership; "
+                        f"installed files were not changed: {path}"
+                    )
+                owned.append(path)
         else:
             owned.extend(recognized_legacy_files(prefix, config, resources, plugin, git_managed_plugin))
             if has_legacy_registration(prefix, config) and (prefix / "bin/clipper") not in owned:

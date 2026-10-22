@@ -51,10 +51,11 @@ PREFIX/
   libexec/omarchy-clipper/
     clipper-reader                           C++ Article Reader
     clipper-helper                           bounded operation helper
-  share/omarchy-clipper/
-    .install-state.json
-    backend.lock                             persistent lifetime lock
-    ui/...
+  share/
+    .omarchy-clipper-backend.lock            persistent lifetime lock
+    omarchy-clipper/
+      .install-state.json
+      ui/...
 ```
 
 Before writing, the installer checks one version across the plugin manifest,
@@ -68,10 +69,14 @@ replacing `bin/clipper` and adding the Rust components. It does not copy,
 replace, or convert the current Collection.
 
 Each installed application and Reader process holds a shared lock on
-`backend.lock`. Install, repair, and uninstall require its exclusive lock and
-fail before component writes while Clipper is active. Lifecycle commands never
-replace or remove the lock file, so later operations synchronize on the same
-inode.
+`PREFIX/share/.omarchy-clipper-backend.lock`. The lock is outside the
+Collection so older public versions do not interpret it as Collection content.
+Install, repair, and uninstall require its exclusive lock and fail before
+component writes while Clipper is active. Lifecycle commands never replace or
+remove the lock file, so later operations synchronize on the same inode.
+The `PREFIX/share` parent must be owned by the current user and must not be
+writable by group or other users; the lock must be a single-link regular file
+owned by the current user with mode `0600`.
 
 The installer writes components atomically and records their SHA-256 ownership
 in `.install-state.json`. If a later write fails, it restores the preceding
@@ -84,10 +89,12 @@ and user content are outside the install transaction.
 python3 scripts/uninstall.py
 ```
 
-Uninstall removes only unchanged, recorded companion files. It retains the
-Collection and the persistent backend lock. Collection deletion remains a
-separate explicit `--purge-data-dir` operation. Companion and install-state
-removal is transactional: if one of those deletions fails, previously removed
-companion files are restored before the command reports failure. Explicit
-Collection purge is destructive and is not included in that rollback; a purge
-failure reports that Collection cleanup may be incomplete.
+Before deleting anything, uninstall refuses if any still-present recorded file
+no longer matches its ownership digest. A recorded file that is already
+missing is treated as already removed. Uninstall retains the Collection and
+the persistent backend lock. Collection deletion remains a separate explicit
+`--purge-data-dir` operation. Companion and install-state removal is
+transactional: if one of those deletions fails, previously removed companion
+files are restored before the command reports failure. Explicit Collection
+purge is destructive and is not included in that rollback; a purge failure
+reports that Collection cleanup may be incomplete.

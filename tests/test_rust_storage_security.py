@@ -63,7 +63,7 @@ def digest(path: Path) -> str:
 
 
 class RustStorageSecurityTests(unittest.TestCase):
-    def test_installed_resources_and_lifetime_lock_can_share_collection(self):
+    def test_installed_resources_can_share_collection(self):
         with tempfile.TemporaryDirectory(prefix="clipper-installed-storage-") as temporary:
             root = Path(temporary)
             environment = runtime_environment(root / "environment")
@@ -72,36 +72,27 @@ class RustStorageSecurityTests(unittest.TestCase):
             (collection / ".install-state.json").write_text('{}')
             (collection / "ui").mkdir()
             (collection / "extension").mkdir()
-            lock = collection / "backend.lock"
-            lock.touch(mode=0o600)
-            inode = lock.stat().st_ino
             process = run_request(collection, environment)
             self.assertEqual(process.returncode, 0, process.stderr.decode())
             self.assertTrue(json.loads(process.stdout)["ok"])
             inspected = run_request(collection, environment, value={"op": "asset.reconcile"})
             self.assertEqual(inspected.returncode, 0, inspected.stderr.decode())
             self.assertTrue(json.loads(inspected.stdout)["ok"])
-            self.assertEqual((lock.stat().st_ino, mode(lock)), (inode, 0o600))
 
-    def test_installed_lifetime_lock_links_are_rejected_without_target_mutation(self):
-        for kind in ("symlink", "hardlink"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                environment = runtime_environment(root / "environment")
-                collection = root / "collection"
-                collection.mkdir(mode=0o700)
-                (collection / ".install-state.json").write_text('{}')
-                target = root / "outside"
-                target.write_bytes(b"unchanged")
-                target.chmod(0o644)
-                lock = collection / "backend.lock"
-                if kind == "symlink":
-                    lock.symlink_to(target)
-                else:
-                    os.link(target, lock)
-                process = run_request(collection, environment)
-                self.assertNotEqual(process.returncode, 0)
-                self.assertEqual((target.read_bytes(), mode(target)), (b"unchanged", 0o644))
+    def test_internal_backend_lock_is_rejected_as_unrelated(self):
+        with tempfile.TemporaryDirectory(prefix="clipper-installed-storage-") as temporary:
+            root = Path(temporary)
+            environment = runtime_environment(root / "environment")
+            collection = root / "collection"
+            collection.mkdir(mode=0o700)
+            (collection / ".install-state.json").write_text('{}')
+            lock = collection / "backend.lock"
+            lock.touch(mode=0o600)
+
+            process = run_request(collection, environment)
+
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn(b"contains unrelated entry backend.lock", process.stderr)
 
     @classmethod
     def setUpClass(cls):

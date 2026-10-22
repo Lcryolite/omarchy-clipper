@@ -13,9 +13,9 @@ python3 scripts/install.py \
 
 Close Reader windows and wait for browser captures to finish, then run the same
 installer command without `--dry-run`. The installer obtains the persistent
-exclusive lifecycle lock before replacing any component. Each replacement is
-atomic, and a later failure restores the components and install state from
-before the command.
+exclusive lifecycle lock at `PREFIX/share/.omarchy-clipper-backend.lock`
+before replacing any component. Each replacement is atomic, and a later
+failure restores the components and install state from before the command.
 
 The repair reuses the current Collection in place. It does not restore, copy,
 or convert the database, WAL files, assets, notes, or Trash state.
