@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import closing, redirect_stderr
 from unittest import mock
 
 
@@ -106,6 +106,57 @@ class PublicBackendInstallTests(unittest.TestCase):
             check=check,
             env=environment,
         )
+
+    def run_loaded_with_state_lock_probe(self, script, *arguments):
+        previous_lifecycle = sys.modules.pop("lifecycle", None)
+        sys.path.insert(0, str(self.source / "scripts"))
+        observed = []
+        locks = []
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"synthetic_locked_{script.removesuffix('.py')}",
+                self.source / "scripts" / script,
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            original_load_state = module.load_state
+            original_acquire = module.acquire_backend_lock
+
+            def acquire_backend_lock(*arguments, **keywords):
+                lock = original_acquire(*arguments, **keywords)
+                locks.append(lock)
+                return lock
+
+            def load_state_under_lock(path):
+                lock_path = self.prefix / "share/.omarchy-clipper-backend.lock"
+                with lock_path.open("r+b", buffering=0) as contender:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append(path)
+                return original_load_state(path)
+
+            module.acquire_backend_lock = acquire_backend_lock
+            module.load_state = load_state_under_lock
+            command = [
+                str(self.source / "scripts" / script),
+                "--prefix", str(self.prefix),
+                "--config-dir", str(self.config),
+                *arguments,
+            ]
+            environment = {"PATH": f"{self.tools}:{os.environ.get('PATH', '')}"}
+            with mock.patch.object(sys, "argv", command), mock.patch.dict(
+                os.environ, environment
+            ), mock.patch.object(sys, "stdout", io.StringIO()):
+                module.main()
+        finally:
+            for lock in locks:
+                if lock is not None:
+                    lock.close()
+            sys.path.pop(0)
+            sys.modules.pop("lifecycle", None)
+            if previous_lifecycle is not None:
+                sys.modules["lifecycle"] = previous_lifecycle
+        self.assertTrue(observed, "load_state probe was not reached")
 
     def state(self):
         return json.loads(
@@ -236,7 +287,7 @@ class PublicBackendInstallTests(unittest.TestCase):
             "rust-reinstalled\n",
         )
         self.assertEqual(lock_path.stat().st_ino, lock_inode)
-        with sqlite3.connect(database) as reopened:
+        with closing(sqlite3.connect(database)) as reopened:
             rows = [row[0] for row in reopened.execute("SELECT body FROM clips ORDER BY rowid")]
         self.assertEqual(rows, ["from-old-public", "written-on-rust"])
         self.assertEqual(asset.read_bytes(), b"current asset")
@@ -253,9 +304,33 @@ class PublicBackendInstallTests(unittest.TestCase):
             self.assertFalse(installed.exists())
         self.assertTrue(lock_path.is_file())
         self.assertEqual(lock_path.stat().st_ino, lock_inode)
-        with sqlite3.connect(database) as reopened:
+        with closing(sqlite3.connect(database)) as reopened:
             self.assertEqual(reopened.execute("SELECT COUNT(*) FROM clips").fetchone()[0], 2)
         self.assertEqual(asset.read_bytes(), b"current asset")
+
+    def test_mutating_lifecycle_reads_install_state_under_exclusive_lock(self):
+        self.run_loaded_with_state_lock_probe(
+            "install.py", "--chromium-extension-id", EXTENSION_ID
+        )
+        self.run_loaded_with_state_lock_probe("uninstall.py")
+
+    def test_dry_run_does_not_create_or_require_lifetime_lock(self):
+        lock_path = self.prefix / "share/.omarchy-clipper-backend.lock"
+        self.run_cli(
+            "install.py", "--chromium-extension-id", EXTENSION_ID, "--dry-run"
+        )
+        self.assertFalse(lock_path.exists())
+        self.assertEqual(self.installed_files(), {})
+
+        self.run_cli("install.py", "--chromium-extension-id", EXTENSION_ID)
+        before = self.installed_files()
+        with lock_path.open("r+b", buffering=0) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.run_cli(
+                "install.py", "--chromium-extension-id", EXTENSION_ID, "--dry-run"
+            )
+            self.run_cli("uninstall.py", "--dry-run")
+        self.assertEqual(self.installed_files(), before)
 
     def test_failed_first_upgrade_restores_old_layout_without_locking_collection(self):
         self._stage_old_public_install()

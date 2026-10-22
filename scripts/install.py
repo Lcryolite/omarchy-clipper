@@ -385,6 +385,9 @@ def main():
         resources = prefix / "share/omarchy-clipper"
         state_path = resources / STATE_NAME
         plugin = config / "omarchy/plugins" / plugin_id
+        _backend_lock = (
+            acquire_backend_lock(prefix, create=True) if not args.dry_run else None
+        )
         state_exists = state_path.exists()
         existing_state = load_state(state_path)
         recorded_owned = []
@@ -494,7 +497,6 @@ def main():
                 for relative in set(existing_state["plugin_files"]) - {str(path) for path in plugin_files}
                 if (target := plugin / safe_relative(relative)) in matching_owned
             )
-        _backend_lock = acquire_backend_lock(prefix, create=True)
         rollback = InstallRollback(rollback_targets)
         copy_file(backend_source, binary, 0o755)
         for source, destination, _ in components:

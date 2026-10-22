@@ -261,6 +261,9 @@ def main():
         ensure_no_symlinks(config)
         resources = prefix / "share/omarchy-clipper"
         state_path = resources / STATE_NAME
+        _backend_lock = (
+            acquire_backend_lock(prefix, create=True) if not args.dry_run else None
+        )
         state = load_state(state_path)
         plugin = config / "omarchy/plugins" / plugin_identity()
         git_managed_plugin = (plugin / ".git").exists()
@@ -314,7 +317,6 @@ def main():
             print(json.dumps(plan, indent=2))
             return
 
-        _backend_lock = acquire_backend_lock(prefix, create=False)
         boundaries = {prefix, config, resources, plugin}
         removal = None
         try:
