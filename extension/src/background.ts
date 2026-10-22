@@ -77,7 +77,11 @@ class ScopedOperationError extends Error {
 
 const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
-async function nativeRequest(request: { op: string; [key: string]: unknown }): Promise<Record<string, any>> {
+export async function nativeRequest(
+  request: { op: string; [key: string]: unknown },
+  signal?: AbortSignal,
+): Promise<Record<string, any>> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const port = chrome.runtime.connectNative(NATIVE_HOST);
     const timeoutMs = request.op === "capture.region"
@@ -86,18 +90,21 @@ async function nativeRequest(request: { op: string; [key: string]: unknown }): P
         ? SETTINGS_TIMEOUT_MS
         : NATIVE_TIMEOUT_MS;
     let settled = false;
+    let timeout: ReturnType<typeof setTimeout>;
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      port.onMessage.removeListener(onMessage);
+      port.onDisconnect.removeListener(onDisconnect);
       callback();
       port.disconnect();
     };
-    const timeout = setTimeout(() => {
-      finish(() => reject(new Error(`The native host did not respond within ${timeoutMs / 1_000} seconds.`)));
-    }, timeoutMs);
-
-    port.onMessage.addListener((response: unknown) => {
+    const onAbort = (): void => {
+      finish(() => reject(signal?.reason ?? new Error("Native request was cancelled.")));
+    };
+    const onMessage = (response: unknown): void => {
       finish(() => {
         try {
           resolve(unwrapNativeResponse(response));
@@ -105,12 +112,19 @@ async function nativeRequest(request: { op: string; [key: string]: unknown }): P
           reject(error);
         }
       });
-    });
-    port.onDisconnect.addListener(() => {
+    };
+    const onDisconnect = (): void => {
       if (settled) return;
       const message = chrome.runtime.lastError?.message;
       finish(() => reject(new Error(message || "The native host disconnected before replying.")));
-    });
+    };
+
+    timeout = setTimeout(() => {
+      finish(() => reject(new Error(`The native host did not respond within ${timeoutMs / 1_000} seconds.`)));
+    }, timeoutMs);
+    port.onMessage.addListener(onMessage);
+    port.onDisconnect.addListener(onDisconnect);
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
       port.postMessage(request);

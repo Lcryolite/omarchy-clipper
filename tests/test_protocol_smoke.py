@@ -10,7 +10,9 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "build/clipper"
+BINARY = ROOT / "backend/target/release/omarchy-clipper-backend"
+READER = ROOT / "build/clipper-reader"
+HELPER = ROOT / "build/clipper-helper"
 ORIGIN = "chrome-extension://" + "a" * 32 + "/"
 
 
@@ -37,16 +39,15 @@ class ProtocolSmokeTests(unittest.TestCase):
 
     def request(self, **request):
         return json.loads(self.run_binary(
-            BINARY, ["--data-dir", str(self.data), "--request"],
+            BINARY, ["--data-dir", str(self.data), "--helper-bin", str(HELPER),
+                     "--request"],
             json.dumps(request).encode(),
         ))
 
     def test_component_versions_match(self):
         version = self.run_binary(BINARY, ["--version"]).strip()
         self.assertTrue(version)
-        self.assertEqual(version, self.run_binary(
-            ROOT / "build/clipper-native", ["--version"],
-        ).strip())
+        self.assertEqual(version.split()[-1], self.run_binary(READER, ["--version"]).strip())
 
     def test_draft_persists_and_rejects_stale_writes(self):
         initial = self.request(op="draft.get")
@@ -74,7 +75,8 @@ class ProtocolSmokeTests(unittest.TestCase):
             frames.extend(struct.pack("=I", len(payload)) + payload)
         output = self.run_binary(
             BINARY, ["--data-dir", str(self.data), "--native",
-                     "--allowed-origin", ORIGIN, ORIGIN], bytes(frames),
+                     "--allowed-origin", ORIGIN, ORIGIN,
+                     "--helper-bin", str(HELPER)], bytes(frames),
         )
         responses = []
         while output:

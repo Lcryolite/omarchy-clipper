@@ -8,6 +8,7 @@ import re
 import sqlite3
 import stat
 import sys
+import tempfile
 from urllib.parse import quote
 
 sys.dont_write_bytecode = True
@@ -17,6 +18,7 @@ from lifecycle import (
     HOST_NAME,
     STATE_NAME,
     LifecycleError,
+    acquire_backend_lock,
     absolute,
     ensure_no_symlinks,
     file_digest,
@@ -208,6 +210,43 @@ def remove_empty_owned_directories(files, boundaries):
             pass
 
 
+def restore_file(path, content, mode):
+    """Atomically restore one companion file in its original directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+class CompanionRemoval:
+    """Remove companion files as one recoverable lifecycle operation."""
+
+    def __init__(self, targets):
+        self.originals = {
+            path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+            for path in dict.fromkeys(targets)
+            if path.exists()
+        }
+        self.removed = []
+
+    def remove(self):
+        for path in self.originals:
+            path.unlink()
+            self.removed.append(path)
+
+    def restore(self):
+        for path in reversed(self.removed):
+            content, mode = self.originals[path]
+            restore_file(path, content, mode)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", type=Path, default=Path.home() / ".local")
@@ -250,7 +289,8 @@ def main():
         if state:
             owned.append(state_path)
         purge = collection_files(args.purge_data_dir, prefix, config) if args.purge_data_dir else []
-        candidates = list(dict.fromkeys(owned + purge))
+        companions = list(dict.fromkeys(owned))
+        candidates = list(dict.fromkeys(companions + purge))
         for path in candidates:
             validate_existing_file(path)
 
@@ -262,12 +302,40 @@ def main():
             print(json.dumps(plan, indent=2))
             return
 
-        removed = []
-        for path in candidates:
-            if path.exists():
-                path.unlink()
-                removed.append(path)
+        _backend_lock = acquire_backend_lock(prefix, create=False)
         boundaries = {prefix, config, resources, plugin}
+        removal = None
+        try:
+            removal = CompanionRemoval(companions)
+            removal.remove()
+        except OSError as error:
+            if removal is None or not removal.removed:
+                raise UninstallError(
+                    "could not prepare companion removal; installed files were not changed"
+                ) from error
+            try:
+                removal.restore()
+            except OSError as restore_error:
+                raise UninstallError(
+                    "companion removal failed and the prior installation could not be restored"
+                ) from restore_error
+            raise UninstallError(
+                "companion removal failed; the prior installation was restored"
+            ) from error
+
+        purged = []
+        try:
+            for path in purge:
+                if path.exists():
+                    path.unlink()
+                    purged.append(path)
+        except OSError as error:
+            remove_empty_owned_directories(removal.removed + purged, boundaries)
+            raise UninstallError(
+                "companion files were removed, but Collection removal is incomplete"
+            ) from error
+
+        removed = removal.removed + purged
         remove_empty_owned_directories(removed, boundaries)
         print(json.dumps(plan, indent=2))
         if args.purge_data_dir:

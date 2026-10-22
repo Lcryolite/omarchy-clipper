@@ -70,11 +70,52 @@ is not intentionally included in `extension/dist/`:
 `package-lock.json` is the authoritative complete npm package and version
 inventory for this candidate.
 
+The security test tools also use `tsx` (MIT), `@types/node` (MIT), and
+`playwright-core@1.58.2` (Apache-2.0). These are development-only dependencies;
+Playwright uses a system Chromium binary and is not bundled with the extension.
+
+## Rust backend dependencies
+
+`backend/Cargo.lock` pins the complete Rust dependency graph. The following
+license declarations were read from the locked crates' package manifests;
+build-only and platform-specific entries are included. Source and license
+files are available in each versioned crate at `https://crates.io/crates/NAME/VERSION`.
+Binary distributions must retain the applicable upstream license texts and
+notices for compiled dependencies.
+
+| Crate | Version | Declared license |
+| --- | --- | --- |
+| base64 | 0.22.1 | MIT OR Apache-2.0 |
+| bitflags | 2.13.2 | MIT OR Apache-2.0 |
+| fallible-iterator | 0.3.0 | MIT/Apache-2.0 |
+| fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 |
+| foldhash | 0.1.5 | Zlib |
+| hashbrown | 0.15.5 | MIT OR Apache-2.0 |
+| hashlink | 0.10.0 | MIT OR Apache-2.0 |
+| itoa | 1.0.18 | MIT OR Apache-2.0 |
+| libc | 0.2.189 | MIT OR Apache-2.0 |
+| libsqlite3-sys | 0.32.0 | MIT |
+| memchr | 2.8.3 | Unlicense OR MIT |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 |
+| proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |
+| quote | 1.0.47 | MIT OR Apache-2.0 |
+| rusqlite | 0.34.0 | MIT |
+| serde | 1.0.229 | MIT OR Apache-2.0 |
+| serde_core | 1.0.229 | MIT OR Apache-2.0 |
+| serde_derive | 1.0.229 | MIT OR Apache-2.0 |
+| serde_json | 1.0.149 | MIT OR Apache-2.0 |
+| smallvec | 1.16.1 | MIT OR Apache-2.0 |
+| syn | 3.0.5 | MIT OR Apache-2.0 |
+| unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 |
+| vcpkg | 0.2.15 | MIT/Apache-2.0 |
+| zmij | 1.0.23 | MIT |
+
 ## Native and desktop system dependencies
 
 The executables dynamically link system-provided Qt 6 libraries for
-Core, Gui, Widgets, Sql, Qml, Quick, QuickControls2, and WebEngineQuick, plus
-libxml2. The mixed detail helper uses Widgets without linking WebEngine.
+Core, Gui, Widgets, Qml, Quick, QuickControls2, and WebEngineQuick, plus
+libxml2. The Rust backend uses system SQLite through `rusqlite`; SQLite is
+not bundled. The mixed detail helper uses Widgets without linking WebEngine.
 Those libraries and their license materials are supplied by the user's system;
 they are not copied into this source candidate. Omarchy, Quickshell,
 `wl-clipboard`, a supported browser, Node.js, and npm are external runtime or

@@ -36,7 +36,8 @@ Omarchy Clipper 可从 Omarchy 状态栏保存文字与图片混合的收藏。�
 
 - 支持 Quattro 插件命令的 Omarchy，以及 Quickshell 运行时
 - C++20 编译器、GNU Make、`pkg-config` 和 `wl-clipboard`
-- Qt 6 Core、Gui、Widgets、Sql、Qml、Quick、QuickControls2 和 WebEngineQuick
+- 通过 rustup 安装的 stable 工具链（Rust 1.89 或更新版本）、Cargo 和 SQLite 开发文件
+- Qt 6 Core、Gui、Widgets、Qml、Quick、QuickControls2 和 WebEngineQuick
 - 用于嵌入界面翻译的 Qt Linguist（`lrelease6`）与 Qt 资源编译器（`rcc`）
 - libxml2 开发文件
 - 用于构建浏览器扩展的 Node.js 和 npm
@@ -91,6 +92,9 @@ omarchy plugin add https://github.com/Lcryolite/omarchy-clipper
 
 在 Git 管理的检出目录中构建：
 
+所有收藏存储与请求均由 Rust 处理，Qt 保留文章阅读器与原生笔记窗口。
+组件布局与修复方式参见[后端安装](docs/backend-installation.md)。
+
 ```sh
 PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper"
 cd "$PLUGIN_DIR"
@@ -114,7 +118,7 @@ python3 scripts/install.py \
 omarchy plugin enable lcryolite.clipper
 ```
 
-未配置某个浏览器时，省略对应选项。旧版 `--extension-id` 选项会为两个受支持浏览器渠道注册同一个 ID。安装器只修改用户拥有的目标位置，无需 `sudo`。默认将 `clipper` 和配套的混合收藏详情程序 `clipper-native` 安装到 `${HOME}/.local/bin`，并记录两者以便安全更新和卸载。修改目标位置前，安装器会验证 `wl-clipboard`、两个已构建程序、全部扩展输出，以及插件、扩展、应用和原生辅助程序的版本是否匹配。
+未配置某个浏览器时，省略对应选项。旧版 `--extension-id` 选项会为两个受支持浏览器渠道注册同一个 ID。安装器只修改用户拥有的目标位置，无需 `sudo`。默认将 Rust 入口 `clipper` 和笔记窗口 `clipper-native` 安装到 `${HOME}/.local/bin`，将保留的 C++ 阅读器与辅助程序安装到 `${HOME}/.local/libexec/omarchy-clipper`。修改目标位置前，会检查所需工具、扩展输出、组件版本及后端占用锁。
 
 注册完成后，重新加载各个已解压的扩展。
 
@@ -197,7 +201,7 @@ omarchy plugin enable lcryolite.clipper &&
 omarchy restart shell
 ```
 
-如果克隆或迁移失败，命令链会停止，旧控件仍保持启用。最后的 shell 重启会载入更新后的面板；状态栏会短暂消失，桌面应用与收藏保持不变。重新构建后，请重新加载各个已解压的浏览器扩展。重复安装配套组件会更新两个受管理程序及其他受管理文件，同时保留持久设置和收藏。
+如果克隆或迁移失败，命令链会停止，旧控件仍保持启用。最后的 shell 重启会载入更新后的面板；状态栏会短暂消失，桌面应用与收藏保持不变。重新构建后，请重新加载各个已解压的浏览器扩展。重复安装配套组件会更新受管理组件及其他受管理文件，同时保留持久设置和收藏。
 
 如果迁移提示未找到旧版 Clipper 设置，请勿禁用旧控件。请恢复设置备份，或使用刚克隆到 `MIGRATION_SOURCE` 的辅助工具写入你明确知道的值，然后重试迁移：
 
@@ -211,7 +215,7 @@ python3 "$MIGRATION_SOURCE/scripts/install.py" --migrate-settings
 
 ## 卸载
 
-在检出目录仍存在时，移除两个配套程序和浏览器注册：
+在检出目录仍存在时，移除配套组件和浏览器注册：
 
 ```sh
 cd "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper" &&
@@ -258,7 +262,8 @@ cd omarchy-clipper
 npm ci --ignore-scripts
 make -j2 all extension typecheck
 omarchy plugin validate .
-test "$(build/clipper --version)" = "0.1.0"
+test "$(build/clipper-reader --version)" = "0.1.0"
+test "$(backend/target/release/omarchy-clipper-backend --version)" = "omarchy-clipper-backend 0.1.0"
 test "$(build/clipper-native --version)" = "0.1.0"
 ```
 

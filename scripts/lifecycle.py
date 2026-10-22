@@ -1,23 +1,75 @@
-"""Shared path and ownership rules for Clipper lifecycle commands."""
+"""Shared path, locking, and ownership rules for Clipper lifecycle commands."""
 
+import errno
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import stat
 
 
 HOST_NAME = "com.omarchy.clipper"
 STATE_NAME = ".install-state.json"
+BACKEND_LOCK_NAME = "backend.lock"
 BROWSERS = {
     "chromium": ("chromium", "omarchy-clipper-host-chromium"),
     "brave": ("BraveSoftware/Brave-Origin-Nightly", "omarchy-clipper-host-brave"),
+}
+COMPONENT_FILES = {
+    "bin/clipper-native",
+    "libexec/omarchy-clipper/clipper-helper",
+    "libexec/omarchy-clipper/clipper-reader",
 }
 
 
 class LifecycleError(Exception):
     pass
+
+
+def acquire_backend_lock(prefix, *, create):
+    """Hold the installed backend lifetime lock exclusively during mutation."""
+    lock_path = absolute(prefix) / "share/omarchy-clipper" / BACKEND_LOCK_NAME
+    ensure_no_symlinks(lock_path)
+    if not create and not lock_path.exists():
+        return None
+    if create:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_no_symlinks(lock_path)
+
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+    if create:
+        flags |= os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        raise LifecycleError(f"cannot open backend lifetime lock: {lock_path}") from error
+
+    lock = os.fdopen(descriptor, "r+b", buffering=0)
+    try:
+        status = os.fstat(lock.fileno())
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid()
+                or status.st_nlink != 1 or stat.S_IMODE(status.st_mode) != 0o600):
+            raise LifecycleError(
+                f"backend lifetime lock must be a private, single-link user-owned file: {lock_path}"
+            )
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN):
+                raise LifecycleError(
+                    "Clipper is active; close the Reader and browser capture operations "
+                    "before installing, repairing, or uninstalling"
+                ) from error
+            raise LifecycleError(f"cannot lock backend lifetime lock: {lock_path}") from error
+        return lock
+    except Exception:
+        lock.close()
+        raise
 
 
 def absolute(path):
@@ -76,12 +128,15 @@ def validate_state(state, *, label="install state"):
         )
     if version != 2:
         raise LifecycleError(f"{label} has an unsupported version")
-    for key in ("resource_files", "plugin_files"):
-        values = state.get(key)
+    for key in ("resource_files", "plugin_files", "component_files"):
+        values = state.get(key, []) if key == "component_files" else state.get(key)
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise LifecycleError(f"{label} is invalid")
         for value in values:
             safe_relative(value)
+            if key == "component_files" and value not in COMPONENT_FILES:
+                raise LifecycleError(f"{label} is invalid")
+        state[key] = values
     records = state.get("owned_files")
     if not isinstance(records, list):
         raise LifecycleError(f"{label} is invalid")

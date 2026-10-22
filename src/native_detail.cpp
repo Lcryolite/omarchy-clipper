@@ -1,4 +1,4 @@
-#include "collection.h"
+#include "runtime_backend.h"
 #include "code_highlight.h"
 #include "language.h"
 #include "theme.h"
@@ -71,9 +71,9 @@ QString responseError(const QJsonObject &response)
 class OwnedAssetBrowser final : public QTextBrowser
 {
 public:
-    explicit OwnedAssetBrowser(Collection &collection, QWidget *parent = nullptr)
+    explicit OwnedAssetBrowser(RuntimeBackend &backend, QWidget *parent = nullptr)
         : QTextBrowser(parent)
-        , m_collection(collection)
+        , m_backend(backend)
     {
         setOpenExternalLinks(false);
         setOpenLinks(false);
@@ -148,13 +148,15 @@ protected:
         }
 
         const QString id = url.path().mid(1);
-        QFile file(m_collection.assetPath(id));
-        if (!file.open(QIODevice::ReadOnly)) {
+        const QByteArray bytes = m_backend.readAsset(id);
+        QBuffer buffer;
+        buffer.setData(bytes);
+        if (bytes.isEmpty() || !buffer.open(QIODevice::ReadOnly)) {
             m_rejectedResources.insert(url.toString(QUrl::FullyEncoded));
             return {};
         }
 
-        QImageReader reader(&file);
+        QImageReader reader(&buffer);
         reader.setAutoTransform(true);
         reader.setDecideFormatFromContent(true);
         const QSize sourceSize = reader.size();
@@ -193,7 +195,7 @@ private:
         return validId.match(id).hasMatch() && m_ownedAssetIds.contains(id);
     }
 
-    Collection &m_collection;
+    RuntimeBackend &m_backend;
     QSet<QString> m_ownedAssetIds;
     QSet<QString> m_decodedAssetIds;
     QHash<QString, QSize> m_decodedSizes;
@@ -449,9 +451,9 @@ private:
 class MixedReadingView final : public QScrollArea
 {
 public:
-    explicit MixedReadingView(Collection &collection, QWidget *parent = nullptr)
+    explicit MixedReadingView(RuntimeBackend &backend, QWidget *parent = nullptr)
         : QScrollArea(parent)
-        , m_collection(collection)
+        , m_backend(backend)
         , m_content(new QWidget(this))
         , m_layout(new QVBoxLayout(m_content))
     {
@@ -585,7 +587,7 @@ protected:
 private:
     void addMarkdownBrowser(const QString &markdown, const QJsonObject &theme, bool images)
     {
-        auto *browser = new OwnedAssetBrowser(m_collection, m_content);
+        auto *browser = new OwnedAssetBrowser(m_backend, m_content);
         browser->setObjectName(images ? QStringLiteral("mixedImages")
                                       : QStringLiteral("mixedProse"));
         browser->setOwnedAssets(m_assets);
@@ -693,7 +695,7 @@ private:
         }
     }
 
-    Collection &m_collection;
+    RuntimeBackend &m_backend;
     QWidget *m_content = nullptr;
     QVBoxLayout *m_layout = nullptr;
     QList<OwnedAssetBrowser *> m_browsers;
@@ -834,9 +836,10 @@ private:
 class NativeMixedWindow final : public QMainWindow
 {
 public:
-    NativeMixedWindow(const QString &dataDir, const QString &clipId)
+    NativeMixedWindow(const QString &dataDir, const QString &clipId,
+                      const QString &backend)
         : m_language()
-        , m_collection(dataDir)
+        , m_backend(dataDir, backend)
         , m_clipId(clipId)
     {
         setWindowTitle(uiText("Clipper — Detail"));
@@ -889,7 +892,7 @@ public:
         m_editor->setObjectName(QStringLiteral("mixedEditor"));
         m_editor->setPlaceholderText(uiText("Edit Markdown"));
         m_editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-        m_preview = new MixedReadingView(m_collection, central);
+        m_preview = new MixedReadingView(m_backend, central);
         layout->addWidget(m_editor, 1);
         layout->addWidget(m_preview, 1);
         m_attachmentScroll = new QScrollArea(central);
@@ -1046,7 +1049,7 @@ private:
             statusBar()->showMessage(uiText("Image data is empty"), 10000);
             return false;
         }
-        const QJsonObject response = m_collection.dispatch(
+        const QJsonObject response = m_backend.dispatch(
             {{QStringLiteral("op"), QStringLiteral("asset.import")},
              {QStringLiteral("data"), QString::fromLatin1(bytes.toBase64())},
              {QStringLiteral("mime"), mime},
@@ -1157,12 +1160,12 @@ private:
             *error = uiText("Image does not belong to this clip");
             return false;
         }
-        QFile file(m_collection.assetPath(id));
-        if (!file.open(QIODevice::ReadOnly)) {
+        QString readError;
+        const QByteArray original = m_backend.readAsset(id, nullptr, &readError);
+        if (original.isEmpty()) {
             *error = uiText("Image is missing");
             return false;
         }
-        const QByteArray original = file.readAll();
         QBuffer buffer;
         buffer.setData(original);
         if (!buffer.open(QIODevice::ReadOnly)) {
@@ -1191,10 +1194,14 @@ private:
         QJsonObject asset;
         if (!findAsset(id, &asset))
             return uiText("Image does not belong to this clip");
-        QFile file(m_collection.assetPath(id));
-        if (!file.open(QIODevice::ReadOnly))
+        const QByteArray bytes = m_backend.readAsset(id);
+        if (bytes.isEmpty())
             return uiText("Image is missing");
-        QImageReader reader(&file);
+        QBuffer buffer;
+        buffer.setData(bytes);
+        if (!buffer.open(QIODevice::ReadOnly))
+            return uiText("Image could not be read");
+        QImageReader reader(&buffer);
         reader.setDecideFormatFromContent(true);
         return reader.canRead() ? QString() : uiText("Image could not be decoded");
     }
@@ -1453,7 +1460,7 @@ private:
 
     void load()
     {
-        const QJsonObject response = m_collection.dispatch(
+        const QJsonObject response = m_backend.dispatch(
             {{QStringLiteral("op"), QStringLiteral("clip.get")},
              {QStringLiteral("id"), m_clipId}});
         if (!response.value(QStringLiteral("ok")).toBool())
@@ -1485,7 +1492,7 @@ private:
             return true;
         }
         const QJsonArray retainedAssetIds = assetIds(m_assets);
-        const QJsonObject response = m_collection.dispatch(
+        const QJsonObject response = m_backend.dispatch(
             {{QStringLiteral("op"), QStringLiteral("clip.edit")},
              {QStringLiteral("id"), m_clipId},
              {QStringLiteral("text"), m_editor->toPlainText()},
@@ -1524,7 +1531,7 @@ private:
     }
 
     LanguageSettings m_language;
-    Collection m_collection;
+    RuntimeBackend m_backend;
     QString m_clipId;
     int m_revision = -1;
     QString m_savedText;
@@ -1581,7 +1588,13 @@ int main(int argc, char **argv)
         QStringLiteral("DIR"));
     const QCommandLineOption openOption(
         QStringLiteral("open"), QStringLiteral("Mixed clip ID (required)"), QStringLiteral("ID"));
-    parser.addOptions({dataDirOption, openOption});
+    const QCommandLineOption backendOption(
+        QStringLiteral("backend-bin"), QStringLiteral("Rust backend executable"),
+        QStringLiteral("PATH"));
+    const QCommandLineOption uiDirOption(
+        QStringLiteral("ui-dir"), QStringLiteral("Ignored Reader UI directory"),
+        QStringLiteral("DIR"));
+    parser.addOptions({dataDirOption, openOption, backendOption, uiDirOption});
     parser.process(app);
 
     if (!parser.isSet(dataDirOption) || parser.value(dataDirOption).isEmpty()
@@ -1591,7 +1604,9 @@ int main(int argc, char **argv)
     }
 
     try {
-        NativeMixedWindow window(parser.value(dataDirOption), parser.value(openOption));
+        InstallationLifetimeLock lifetimeLock;
+        NativeMixedWindow window(parser.value(dataDirOption), parser.value(openOption),
+                                 parser.value(backendOption));
         window.show();
         return app.exec();
     } catch (const std::exception &error) {
