@@ -19,6 +19,7 @@ from lifecycle import (
     HOST_NAME,
     STATE_NAME,
     LifecycleError,
+    acquire_backend_lock,
     absolute,
     ensure_no_symlinks,
     file_digest,
@@ -77,7 +78,13 @@ def source_files(directory):
 
 def load_state(path):
     if not path.exists():
-        return {"version": 2, "resource_files": [], "plugin_files": [], "owned_files": []}
+        return {
+            "version": 2,
+            "component_files": [],
+            "resource_files": [],
+            "plugin_files": [],
+            "owned_files": [],
+        }
     validate_destination(path)
     try:
         state = json.loads(path.read_text())
@@ -101,14 +108,29 @@ def read_manifest(path, label):
 def component_version(executable, label):
     try:
         with tempfile.TemporaryDirectory(prefix="clipper-version-check-") as temporary:
-            environment = dict(
-                os.environ,
-                HOME=temporary,
-                XDG_CONFIG_HOME=str(Path(temporary) / "config"),
-                XDG_DATA_HOME=str(Path(temporary) / "data"),
-            )
+            temporary = Path(temporary)
+            environment = {
+                "HOME": str(temporary / "home"),
+                "LANG": "C.UTF-8",
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "TMPDIR": str(temporary / "tmp"),
+                "XDG_CACHE_HOME": str(temporary / "cache"),
+                "XDG_CONFIG_HOME": str(temporary / "config"),
+                "XDG_DATA_HOME": str(temporary / "data"),
+                "XDG_RUNTIME_DIR": str(temporary / "runtime"),
+                "XDG_STATE_HOME": str(temporary / "state"),
+            }
+            for key in ("LD_LIBRARY_PATH", "LIBGL_DRIVERS_PATH", "QT_PLUGIN_PATH"):
+                if key in os.environ:
+                    environment[key] = os.environ[key]
+            for key in (
+                "HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME",
+            ):
+                Path(environment[key]).mkdir(parents=True, exist_ok=True)
+            Path(environment["XDG_RUNTIME_DIR"]).chmod(0o700)
             completed = subprocess.run(
-                [str(executable), "--version", "--data-dir", str(Path(temporary) / "collection")],
+                [str(executable), "--version", "--data-dir", str(temporary / "collection")],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -123,7 +145,7 @@ def component_version(executable, label):
     return version
 
 
-def check_components(binary, native_helper, plugin_manifest):
+def check_components(binary, plugin_manifest, *, binary_version_prefix="", additional_components=()):
     extension_manifest = read_manifest(ROOT / "extension/manifest.json", "browser extension manifest")
     try:
         service_worker = safe_relative(extension_manifest["background"]["service_worker"])
@@ -137,15 +159,16 @@ def check_components(binary, native_helper, plugin_manifest):
         raise InstallError("build the complete browser extension before installing")
     if not shutil.which("wl-copy") or not shutil.which("wl-paste"):
         raise InstallError("wl-clipboard is required before installing")
-    versions = (
-        plugin_version,
-        extension_version,
-        component_version(binary, "native application"),
-        component_version(native_helper, "native detail helper"),
-    )
-    if not all(isinstance(value, str) and value for value in versions):
+    if not all(isinstance(value, str) and value for value in (plugin_version, extension_version)):
         raise InstallError("component versions are invalid")
-    if len(set(versions)) != 1:
+    expected = plugin_version
+    binary_version = component_version(binary, "Rust application")
+    if binary_version_prefix and binary_version != binary_version_prefix + expected:
+        raise InstallError("component versions do not match")
+    versions = [plugin_version, extension_version, binary_version.removeprefix(binary_version_prefix)]
+    for component, label in additional_components:
+        versions.append(component_version(component, label))
+    if any(value != expected for value in versions):
         raise InstallError("component versions do not match")
 
 
@@ -298,14 +321,21 @@ def main():
         if not browser_ids:
             raise InstallError("configure at least one browser extension ID")
 
-        binary_source = ROOT / "build/clipper"
+        reader_source = ROOT / "build/clipper-reader"
+        helper_source = ROOT / "build/clipper-helper"
+        backend_source = ROOT / "backend/target/release/omarchy-clipper-backend"
         native_helper_source = ROOT / "build/clipper-native"
-        required_programs = (binary_source, native_helper_source)
+        component_sources = [
+            (reader_source, Path("libexec/omarchy-clipper/clipper-reader"), "C++ Reader"),
+            (helper_source, Path("libexec/omarchy-clipper/clipper-helper"), "operation helper"),
+            (native_helper_source, Path("bin/clipper-native"), "native detail helper"),
+        ]
+        required_programs = (backend_source, *(source for source, _, _ in component_sources))
         if any(
             source.is_symlink() or not source.is_file() or not os.access(source, os.X_OK)
             for source in required_programs
         ):
-            raise InstallError("build the application, native detail helper, and extension before installing")
+            raise InstallError("build the Rust application, Reader components, and extension before installing")
 
         root_manifest = ROOT / "manifest.json"
         private_manifest = ROOT / "plugin/manifest.json"
@@ -326,7 +356,14 @@ def main():
             raise InstallError("plugin manifest is invalid") from error
         if not isinstance(plugin_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", plugin_id):
             raise InstallError("plugin manifest contains an invalid ID")
-        check_components(binary_source, native_helper_source, plugin_manifest)
+        check_components(
+            backend_source,
+            plugin_manifest,
+            binary_version_prefix="omarchy-clipper-backend ",
+            additional_components=(
+                (source, label) for source, _, label in component_sources
+            ),
+        )
 
         ui_source = ROOT / "ui"
         ui_files = source_files(ui_source)
@@ -340,10 +377,17 @@ def main():
         validate_destination(prefix, directory=True) if prefix.exists() else validate_destination(prefix / ".probe")
         validate_destination(config, directory=True) if config.exists() else validate_destination(config / ".probe")
         binary = prefix / "bin/clipper"
+        components = [
+            (source, prefix / relative, relative)
+            for source, relative, _ in component_sources
+        ]
         native_helper = prefix / "bin/clipper-native"
         resources = prefix / "share/omarchy-clipper"
         state_path = resources / STATE_NAME
         plugin = config / "omarchy/plugins" / plugin_id
+        _backend_lock = (
+            acquire_backend_lock(prefix, create=True) if not args.dry_run else None
+        )
         state_exists = state_path.exists()
         existing_state = load_state(state_path)
         recorded_owned = []
@@ -363,7 +407,8 @@ def main():
                 copy_plugin = False
                 mode = "companion-only"
 
-        write_targets = [binary, native_helper]
+        write_targets = [binary]
+        write_targets.extend(destination for _, destination, _ in components)
         write_targets.extend(resources / relative for relative in resource_files)
         if copy_plugin:
             write_targets.extend(plugin / relative for relative in plugin_files)
@@ -374,6 +419,7 @@ def main():
         )
         targets.extend(resources / relative for relative in resource_files)
         targets.extend(resources / safe_relative(relative) for relative in existing_state["resource_files"])
+        targets.extend(prefix / safe_relative(relative) for relative in existing_state["component_files"])
         if copy_plugin:
             targets.extend(plugin / relative for relative in plugin_files)
             targets.extend(plugin / safe_relative(relative) for relative in existing_state["plugin_files"])
@@ -426,6 +472,10 @@ def main():
             "mode": mode,
             "migration": "legacy" if legacy else None,
             "binary": str(binary),
+            "components": {
+                relative.name: str(destination)
+                for _, destination, relative in components
+            },
             "native_helper": str(native_helper),
             "resources": str(resources),
             "plugin": str(plugin) if copy_plugin else None,
@@ -448,8 +498,9 @@ def main():
                 if (target := plugin / safe_relative(relative)) in matching_owned
             )
         rollback = InstallRollback(rollback_targets)
-        copy_file(native_helper_source, native_helper, 0o755)
-        copy_file(binary_source, binary, 0o755)
+        copy_file(backend_source, binary, 0o755)
+        for source, destination, _ in components:
+            copy_file(source, destination, 0o755)
         for source_relative, destination_relative in zip(ui_files, resource_files):
             copy_file(ui_source / source_relative, resources / destination_relative)
         remove_stale(
@@ -495,7 +546,8 @@ def main():
             if path.is_file()
             and file_digest(path) == record["sha256"]
         }
-        current_owned = [("prefix", binary), ("prefix", native_helper)]
+        current_owned = [("prefix", binary)]
+        current_owned.extend(("prefix", destination) for _, destination, _ in components)
         current_owned.extend(("prefix", resources / relative) for relative in resource_files)
         if copy_plugin:
             current_owned.extend(("config", plugin / safe_relative(relative)) for relative in installed_plugin_files)
@@ -510,6 +562,15 @@ def main():
             owned_records[(record["base"], record["path"])] = record
         state = {
             "version": 2,
+            "component_files": sorted(
+                record[1]
+                for record in owned_records
+                if record[0] == "prefix" and record[1] in {
+                    "bin/clipper-native",
+                    "libexec/omarchy-clipper/clipper-helper",
+                    "libexec/omarchy-clipper/clipper-reader",
+                }
+            ),
             "resource_files": [str(path) for path in resource_files],
             "plugin_files": installed_plugin_files,
             "owned_files": sorted(owned_records.values(), key=lambda item: (item["base"], item["path"])),

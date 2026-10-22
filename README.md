@@ -39,7 +39,8 @@ Actual application views with synthetic sample content; no personal collection d
 
 - Omarchy with the Quattro plugin commands and Quickshell runtime
 - A C++20 compiler, GNU Make, `pkg-config`, and `wl-clipboard`
-- Qt 6 Core, Gui, Widgets, Sql, Qml, Quick, QuickControls2, and WebEngineQuick
+- Rust 1.89 or newer through rustup's stable toolchain, Cargo, and SQLite development files
+- Qt 6 Core, Gui, Widgets, Qml, Quick, QuickControls2, and WebEngineQuick
 - Qt Linguist (`lrelease6`) and Qt's resource compiler (`rcc`) for embedded interface translations
 - libxml2 development files
 - Node.js and npm for the browser extension
@@ -111,6 +112,10 @@ omarchy plugin add https://github.com/Lcryolite/omarchy-clipper
 
 Build from the Git-managed checkout:
 
+Rust handles all Collection storage and requests; Qt retains the article Reader
+and native note window. See [backend installation](docs/backend-installation.md)
+for component layout and repair instructions.
+
 ```sh
 PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/lcryolite.clipper"
 cd "$PLUGIN_DIR"
@@ -140,11 +145,10 @@ omarchy plugin enable lcryolite.clipper
 Omit a browser option when that browser is not configured. The legacy
 `--extension-id` option registers the same ID for both supported browser
 channels. The installer changes only user-owned destinations and does not need
-`sudo`. It installs `clipper` and the sibling `clipper-native` mixed-clip detail
-helper in `${HOME}/.local/bin` by default and records both for safe update and
-uninstall. Before changing destinations, it verifies `wl-clipboard`, both built
-programs, all extension outputs, and matching plugin, extension, application,
-and native helper versions.
+`sudo`. It installs the Rust `clipper` entry point and `clipper-native` note window
+in `${HOME}/.local/bin`, with the retained C++ Reader and bounded helper under
+`${HOME}/.local/libexec/omarchy-clipper`. Before changing destinations, it checks
+the required tools, extension output, component versions and active backend lock.
 Reload each unpacked extension after registration.
 
 ## Usage
@@ -263,7 +267,7 @@ If cloning or migration fails, the command chain stops with the old widget
 still enabled. The final shell restart loads the updated panel; the bar briefly
 disappears while desktop applications and the collection remain in place.
 Reload each unpacked browser extension after rebuilding it. Repeated companion
-installation updates both owned programs and other owned files while preserving
+installation updates owned components and other owned files while preserving
 the durable settings and collection.
 
 If migration reports that no legacy Clipper settings were found, do not disable
@@ -282,7 +286,7 @@ settings.
 
 ## Uninstall
 
-Remove both companion programs and browser registrations while the checkout
+Remove the companion components and browser registrations while the checkout
 still exists:
 
 ```sh
@@ -333,7 +337,8 @@ cd omarchy-clipper
 npm ci --ignore-scripts
 make -j2 all extension typecheck
 omarchy plugin validate .
-test "$(build/clipper --version)" = "0.1.0"
+test "$(build/clipper-reader --version)" = "0.1.0"
+test "$(backend/target/release/omarchy-clipper-backend --version)" = "omarchy-clipper-backend 0.1.0"
 test "$(build/clipper-native --version)" = "0.1.0"
 ```
 

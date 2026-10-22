@@ -28,17 +28,39 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm run build:extension
+      - run: npm run test:browser
 
   native:
-    name: Arch build and protocol tests
+    name: Rust backend and Reader checks
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Install build dependencies
-        run: pacman -Syu --noconfirm --needed git qt6-base qt6-declarative qt6-webengine qt6-tools libxml2 python
+        run: pacman -Syu --noconfirm --needed git qt6-base qt6-declarative qt6-webengine qt6-tools libxml2 sqlite python rustup nodejs npm chromium wl-clipboard
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
       - run: make -j2 all
-      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - run: npm ci --ignore-scripts
+      - run: npm run build:extension
+      - name: Test as an unprivileged desktop user
+        run: |
+          useradd --create-home clipper-test
+          runuser -u clipper-test -- env \
+            CLIPPER_RUST_BIN="$PWD/backend/target/release/omarchy-clipper-backend" \
+            python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Test foreign-owned storage rejection
+        run: |
+          CLIPPER_RUST_BIN="$PWD/backend/target/release/omarchy-clipper-backend" \
+            python3 -m unittest -v \
+            tests.test_storage_security.StorageSecurityTests.test_foreign_owned_database_is_rejected_without_mutation \
+            tests.test_rust_storage_security.RustStorageSecurityTests.test_foreign_owned_database_is_rejected_without_mutation
+      - run: npm run test:browser:chromium
+      - name: Capture through the Rust native host
+        run: |
+          CLIPPER_NATIVE_BIN="$PWD/backend/target/release/omarchy-clipper-backend" \
+          CLIPPER_READER_BIN="$PWD/build/clipper-reader" \
+          CLIPPER_HELPER_BIN="$PWD/build/clipper-helper" \
+          npm run test:browser:packaged-security

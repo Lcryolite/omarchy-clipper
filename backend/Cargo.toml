@@ -1,0 +1,12 @@
+[package]
+name = "omarchy-clipper-backend"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+base64 = "=0.22.1"
+libc = "=0.2.189"
+rusqlite = "=0.34.0"
+serde_json = "=1.0.149"

@@ -377,6 +377,10 @@ function prepareFragment(
   return images;
 }
 
+function inertDocument(document: Document): Document {
+  return document.implementation.createHTMLDocument("");
+}
+
 function sanitize(document: Document, html: string): string {
   const window = document.defaultView;
   if (!window) throw new Error("The page has no browser window.");
@@ -406,7 +410,8 @@ export function finalizeArticleHtml(
   html: string,
   assetIds: Readonly<Record<string, string>>,
 ): string {
-  const container = document.createElement("div");
+  const inert = inertDocument(document);
+  const container = inert.createElement("div");
   container.innerHTML = html;
 
   for (const image of container.querySelectorAll<HTMLImageElement>("img[data-clipper-image]")) {
@@ -419,7 +424,7 @@ export function finalizeArticleHtml(
       continue;
     }
 
-    const placeholder = document.createElement("span");
+    const placeholder = inert.createElement("span");
     placeholder.setAttribute("data-clipper-missing-image", "1");
     placeholder.textContent = image.alt ? `[Missing image: ${image.alt}]` : "[Missing image]";
     image.replaceWith(placeholder);
@@ -444,8 +449,9 @@ function resultFromElement(
   scope: ArticleCapture["scope"],
   title = pageTitle(document),
 ): ArticleCapture {
-  const container = document.createElement("div");
-  const cloned = element.cloneNode(true) as DocumentFragment | Element;
+  const inert = inertDocument(document);
+  const container = inert.createElement("div");
+  const cloned = inert.importNode(element, true) as DocumentFragment | Element;
   pruneNonContent(cloned, element);
   container.append(cloned);
   const images = prepareFragment(document, container);
@@ -468,13 +474,14 @@ function genericCaptureScope(
   scopeName: "article" | "page-index",
   cleaning: CleaningMode,
 ): HTMLElement {
-  const scope = document.createElement("section");
+  const inert = inertDocument(document);
+  const scope = inert.createElement("section");
   scope.setAttribute("data-clipper-scope", scopeName);
   scope.setAttribute("data-clipper-cleaning", cleaning);
-  const notice = document.createElement("aside");
+  const notice = inert.createElement("aside");
   notice.setAttribute("data-clipper-scope-notice", "1");
   notice.textContent = `${scopeName === "article" ? "Captured readable article" : "Captured visible page index"}. ${cleaning === "deep" ? "Deep" : "Standard"} cleaning was applied.`;
-  scope.append(notice, content);
+  scope.append(notice, inert.importNode(content, true));
   return scope;
 }
 
@@ -485,13 +492,14 @@ function genericResultFromElement(
   cleaning: CleaningMode,
   title = pageTitle(document),
 ): ArticleCapture {
-  const captured = element.cloneNode(true) as HTMLElement;
+  const captured = inertDocument(document).importNode(element, true) as HTMLElement;
   pruneNonContent(captured, element);
   cleanSiteContent(captured, cleaning);
   return resultFromElement(document, genericCaptureScope(document, captured, scopeName, cleaning), scopeName, title);
 }
 
 function capturePageIndex(document: Document, cleaning: CleaningMode): ArticleCapture | null {
+  const analysisDocument = inertDocument(document);
   const groups = new Map<Element, HTMLElement[]>();
   const meaningfulArticles: HTMLElement[] = [];
   const eligibleEntries: HTMLElement[] = [];
@@ -499,7 +507,7 @@ function capturePageIndex(document: Document, cleaning: CleaningMode): ArticleCa
     if (source.parentElement?.closest("article, [role='listitem']")) continue;
     if (!isVisiblePageContent(source)) continue;
     if (source.closest("nav, aside, footer, form, dialog, [role='navigation'], [role='complementary']")) continue;
-    const candidate = source.cloneNode(true) as HTMLElement;
+    const candidate = analysisDocument.importNode(source, true) as HTMLElement;
     pruneNonContent(candidate, source);
     cleanSiteContent(candidate, cleaning);
     const linkedHeading = [...candidate.querySelectorAll<HTMLAnchorElement>("h1 a[href], h2 a[href], h3 a[href]")]
@@ -534,9 +542,10 @@ function capturePageIndex(document: Document, cleaning: CleaningMode): ArticleCa
   if (standaloneArticles.length > 1) return null;
   const entries = eligibleEntries.filter((entry) => !main || main.contains(entry));
 
-  const scope = document.createElement("section");
+  const inert = inertDocument(document);
+  const scope = inert.createElement("section");
   for (const source of entries) {
-    const candidate = source.cloneNode(true) as HTMLElement;
+    const candidate = inert.importNode(source, true) as HTMLElement;
     pruneNonContent(candidate, source);
     cleanSiteContent(candidate, cleaning);
     scope.append(candidate);
@@ -555,12 +564,13 @@ function captureGitHubReadme(document: Document, cleaning: CleaningMode = "defau
     "#readme article.markdown-body, [data-testid='readme'] article, article.markdown-body[itemprop='text']",
   );
   if (!readme || compactText(readme.textContent ?? "").length < 10) return null;
-  const captured = readme.cloneNode(true) as HTMLElement;
+  const inert = inertDocument(document);
+  const captured = inert.importNode(readme, true) as HTMLElement;
   cleanSiteContent(captured, cleaning);
-  const scope = document.createElement("section");
+  const scope = inert.createElement("section");
   scope.setAttribute("data-clipper-scope", "github-readme");
   scope.setAttribute("data-clipper-cleaning", cleaning);
-  const notice = document.createElement("aside");
+  const notice = inert.createElement("aside");
   notice.setAttribute("data-clipper-scope-notice", "1");
   notice.textContent = `Captured the repository README. ${cleaning === "deep" ? "Deep" : "Standard"} cleaning was applied.`;
   scope.append(notice, captured);
@@ -577,24 +587,25 @@ function githubEntry(
     ? source
     : source.querySelector<HTMLElement>(".comment-body, .markdown-body");
   if (!body || !compactText(body.textContent ?? "")) return null;
-  const capturedBody = body.cloneNode(true) as HTMLElement;
+  const inert = inertDocument(document);
+  const capturedBody = inert.importNode(body, true) as HTMLElement;
   cleanSiteContent(capturedBody, cleaning);
-  const entry = document.createElement("article");
+  const entry = inert.createElement("article");
   entry.setAttribute("data-clipper-post", "1");
   entry.setAttribute("data-clipper-role", role);
-  const header = document.createElement("header");
+  const header = inert.createElement("header");
   const author = source.querySelector<HTMLElement>(
     ".comment-header .author, [data-testid='comment-header'] .author, [data-hovercard-type='user'], .author",
   );
   if (author) {
-    const strong = document.createElement("strong");
+    const strong = inert.createElement("strong");
     strong.setAttribute("data-clipper-author", "1");
     strong.textContent = compactText(author.textContent ?? "");
     header.append(strong);
   }
   const sourceTime = source.querySelector<HTMLElement>("relative-time[datetime], time[datetime], relative-time, time");
   if (sourceTime) {
-    const time = document.createElement("time");
+    const time = inert.createElement("time");
     const datetime = sourceTime.getAttribute("datetime");
     if (datetime) time.setAttribute("datetime", datetime);
     time.textContent = compactText(sourceTime.textContent ?? "") || datetime || "";
@@ -613,10 +624,11 @@ function captureGitHubDiscussion(document: Document, cleaning: CleaningMode): Ar
   );
   if (!description) return null;
   const scopeName = type === "pull" ? "github-pr-loaded" : "github-issue-loaded";
-  const scope = document.createElement("section");
+  const inert = inertDocument(document);
+  const scope = inert.createElement("section");
   scope.setAttribute("data-clipper-scope", scopeName);
   scope.setAttribute("data-clipper-cleaning", cleaning);
-  const notice = document.createElement("aside");
+  const notice = inert.createElement("aside");
   notice.setAttribute("data-clipper-scope-notice", "1");
   const omitted = Boolean(document.querySelector(
     "[data-testid='deferred-content'], [data-clipper-unloaded-discussion], .ajax-pagination-form, .js-discussion-more",
@@ -689,7 +701,8 @@ function captureDiscuzPage(
     };
   }
 
-  const posts = document.createElement("section");
+  const inert = inertDocument(document);
+  const posts = inert.createElement("section");
   const scope = repliesOnly
     ? "discuz-current-page-replies"
     : includeCurrentPage
@@ -697,7 +710,7 @@ function captureDiscuzPage(
       : "discuz-main-post";
   posts.setAttribute("data-clipper-scope", scope);
   posts.setAttribute("data-clipper-cleaning", cleaning);
-  const notice = document.createElement("aside");
+  const notice = inert.createElement("aside");
   notice.setAttribute("data-clipper-scope-notice", "1");
   notice.textContent = repliesOnly
     ? `Captured visible replies from this page only; the original post was not available. ${cleaning === "deep" ? "Deep" : "Standard"} cleaning was applied.`
@@ -715,7 +728,7 @@ function captureDiscuzPage(
     const body = sourcePost.querySelector<HTMLElement>("[id^='postmessage_']");
     if (!body || compactText(body.textContent ?? "").length === 0) continue;
 
-    const capturedBody = body.cloneNode(true) as HTMLElement;
+    const capturedBody = inert.importNode(body, true) as HTMLElement;
     cleanSiteContent(capturedBody, cleaning);
     for (const clutter of capturedBody.querySelectorAll<HTMLElement>(
       ".sign, .signature, .avatar, .userinfo, .member-info, .reply-control, .pagination, .pg, .a_pr, .a_pt, [id^='ad_']",
@@ -723,27 +736,27 @@ function captureDiscuzPage(
     for (const panel of capturedBody.querySelectorAll<HTMLElement>(".blockcode")) {
       const lines = [...panel.querySelectorAll<HTMLLIElement>("ol > li")];
       if (lines.length === 0) continue;
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
+      const pre = inert.createElement("pre");
+      const code = inert.createElement("code");
       code.textContent = lines.map((line) => line.textContent ?? "").join("\n");
       pre.append(code);
       panel.replaceWith(pre);
     }
 
-    const post = document.createElement("article");
+    const post = inert.createElement("article");
     post.setAttribute("data-clipper-post", "1");
     post.setAttribute("data-clipper-role", sourcePost === originalPost ? "original" : "reply");
-    const header = document.createElement("header");
+    const header = inert.createElement("header");
     const author = sourcePost.querySelector<HTMLElement>(".authi .xw1, .authi a");
     const time = sourcePost.querySelector<HTMLElement>(".authi em, .authi time");
     if (author) {
-      const strong = document.createElement("strong");
+      const strong = inert.createElement("strong");
       strong.setAttribute("data-clipper-author", "1");
       strong.textContent = compactText(author.textContent ?? "");
       header.append(strong);
     }
     if (time) {
-      const timeElement = document.createElement("time");
+      const timeElement = inert.createElement("time");
       const datetime = time.getAttribute("datetime");
       if (datetime) timeElement.setAttribute("datetime", datetime);
       timeElement.textContent = compactText(time.textContent ?? "");
@@ -781,7 +794,7 @@ function captureReadableArticle(document: Document, cleaning: CleaningMode): Art
   }
   if (!parsed?.content) return null;
 
-  const container = document.createElement("article");
+  const container = inertDocument(document).createElement("article");
   container.innerHTML = parsed.content;
   cleanSiteContent(container, cleaning);
   if (!hasMeaningfulContent(container)) return null;
@@ -796,7 +809,7 @@ function captureReadableArticle(document: Document, cleaning: CleaningMode): Art
 function captureSemanticContent(document: Document, cleaning: CleaningMode): ArticleCapture | null {
   const source = document.querySelector<HTMLElement>("main > article, body > article, [role='article'], main");
   if (!source) return null;
-  const candidate = source.cloneNode(true) as HTMLElement;
+  const candidate = inertDocument(document).importNode(source, true) as HTMLElement;
   pruneNonContent(candidate, source);
   cleanSiteContent(candidate, cleaning);
   if (!hasMeaningfulContent(candidate)) return null;
@@ -819,8 +832,9 @@ function captureSelection(document: Document): SelectionCapture | FallbackCaptur
   }
 
   const fragment = selection.getRangeAt(0).cloneContents();
-  const container = document.createElement("div");
-  container.append(fragment);
+  const inert = inertDocument(document);
+  const container = inert.createElement("div");
+  container.append(inert.importNode(fragment, true));
   const images = prepareFragment(document, container);
   const html = sanitize(document, container.innerHTML);
 

@@ -3,7 +3,7 @@ import { NativeHostError } from "./native-response.js";
 import ipaddr from "ipaddr.js";
 
 export type NativeRequestMessage = { op: string; [key: string]: unknown };
-export type NativeRequest = (request: NativeRequestMessage) => Promise<Record<string, any>>;
+export type NativeRequest = (request: NativeRequestMessage, signal?: AbortSignal) => Promise<Record<string, any>>;
 
 export type MissingResource = {
   url: string;
@@ -51,6 +51,7 @@ export type CaptureDependencies = {
   fetchResource: (url: string, signal: AbortSignal) => Promise<Response>;
   hasOriginAccess: (url: string) => Promise<boolean>;
   finalize: (html: string, assetIds: Readonly<Record<string, string>>) => string | Promise<string>;
+  signal?: AbortSignal;
   resourceTimeoutMs?: number;
   totalTimeoutMs?: number;
   duplicateAction?: DuplicateAction;
@@ -243,46 +244,60 @@ async function withResourceTimeout<T>(
   timeoutMs: number,
   timeoutReason: string,
   consume: (response: Response, signal: AbortSignal) => Promise<T>,
+  parentSignal?: AbortSignal,
+): Promise<T> {
+  return beforeAbortOrDeadline(
+    (signal) => fetchResource(url, signal).then((response) => {
+      if (signal.aborted) {
+        cancelResponseBody(response);
+        signal.throwIfAborted();
+      }
+      return consume(response, signal);
+    }),
+    timeoutMs,
+    timeoutReason,
+    parentSignal,
+  );
+}
+
+async function beforeAbortOrDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  timeoutReason: string,
+  parentSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
   const timeoutError = new Error(timeoutReason);
-  let rejectTimeout!: (error: Error) => void;
-  const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    rejectTimeout = reject;
+  let rejectStopped!: (error: unknown) => void;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    rejectStopped = reject;
   });
+  const stop = (error: unknown) => {
+    if (controller.signal.aborted) return;
+    controller.abort(error);
+    rejectStopped(error);
+  };
+  const cancel = () => stop(parentSignal?.reason ?? new Error("Capture cancelled by caller."));
+  if (parentSignal?.aborted) cancel();
+  else parentSignal?.addEventListener("abort", cancel, { once: true });
   const timeout = setTimeout(() => {
-    controller.abort(timeoutError);
-    rejectTimeout(timeoutError);
-  }, timeoutMs);
+    stop(timeoutError);
+  }, Math.max(0, timeoutMs));
   try {
-    const operation = fetchResource(url, controller.signal).then((response) => {
-      if (controller.signal.aborted) {
-        cancelResponseBody(response);
-        controller.signal.throwIfAborted();
-      }
-      return consume(response, controller.signal);
-    });
-    return await Promise.race([operation, timeoutPromise]);
-  } catch (error) {
-    if (controller.signal.aborted) throw timeoutError;
-    throw error;
+    const result = controller.signal.aborted ? stopped : operation(controller.signal);
+    return await Promise.race([result, stopped]);
   } finally {
     clearTimeout(timeout);
+    parentSignal?.removeEventListener("abort", cancel);
   }
 }
 
-async function beforeDeadline<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
-  const timeoutError = new Error(TOTAL_TIMEOUT_REASON);
-  let rejectTimeout!: (error: Error) => void;
-  const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    rejectTimeout = reject;
-  });
-  const timeout = setTimeout(() => rejectTimeout(timeoutError), timeoutMs);
-  try {
-    return await Promise.race([operation, timeoutPromise]);
-  } finally {
-    clearTimeout(timeout);
-  }
+async function beforeDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  parentSignal?: AbortSignal,
+): Promise<T> {
+  return beforeAbortOrDeadline(operation, timeoutMs, TOTAL_TIMEOUT_REASON, parentSignal);
 }
 
 function reason(error: unknown): string {
@@ -303,6 +318,7 @@ function failure(url: string, error: unknown): MissingResource {
 
 async function importCaptureAssets(
   images: readonly CapturedImage[],
+  captureId: string,
   dependencies: CaptureDependencies,
 ): Promise<{
   assetIds: string[];
@@ -321,6 +337,7 @@ async function importCaptureAssets(
   let totalExpired = false;
 
   for (const image of images) {
+    dependencies.signal?.throwIfAborted();
     const resourceKey = image.url || `unresolved:${image.key}`;
     const existingAsset = assetsByUrl.get(resourceKey);
     if (existingAsset) {
@@ -371,8 +388,13 @@ async function importCaptureAssets(
     }
     let hasOriginAccess: boolean;
     try {
-      hasOriginAccess = await beforeDeadline(dependencies.hasOriginAccess(image.url), remainingMs);
+      hasOriginAccess = await beforeDeadline(
+        () => dependencies.hasOriginAccess(image.url),
+        remainingMs,
+        dependencies.signal,
+      );
     } catch (error) {
+      dependencies.signal?.throwIfAborted();
       if (reason(error) === TOTAL_TIMEOUT_REASON) totalExpired = true;
       missing.push(failure(image.url, error));
       continue;
@@ -420,15 +442,22 @@ async function importCaptureAssets(
           signal.throwIfAborted();
           return { bytes, mime };
         },
+        dependencies.signal,
       );
-      if (totalDeadline - performance.now() <= 0) throw new Error(TOTAL_TIMEOUT_REASON);
+      remainingMs = totalDeadline - performance.now();
+      if (remainingMs <= 0) throw new Error(TOTAL_TIMEOUT_REASON);
       const imported = record(
-        await dependencies.native({
-          op: "asset.import",
-          data: base64(downloaded.bytes),
-          mime: downloaded.mime,
-          name: image.name,
-        }),
+        await beforeDeadline(
+          (signal) => dependencies.native({
+            op: "asset.import",
+            captureId,
+            data: base64(downloaded.bytes),
+            mime: downloaded.mime,
+            name: image.name,
+          }, signal),
+          remainingMs,
+          dependencies.signal,
+        ),
         "asset.import",
       );
       const assetId = safeId(imported.id, "asset ID");
@@ -436,6 +465,7 @@ async function importCaptureAssets(
       assetsByUrl.set(resourceKey, assetId);
       assetsByKey[image.key] = assetId;
     } catch (error) {
+      dependencies.signal?.throwIfAborted();
       if (reason(error) === TOTAL_TIMEOUT_REASON) totalExpired = true;
       missing.push(failure(image.url, error));
     }
@@ -472,6 +502,7 @@ export async function submitArticleCapture(
   capture: ArticleCapture | SelectionCapture,
   dependencies: CaptureDependencies,
 ): Promise<CaptureSubmission> {
+  dependencies.signal?.throwIfAborted();
   const checked = record(
     await dependencies.native({
       op: "capture.check",
@@ -480,6 +511,7 @@ export async function submitArticleCapture(
     }),
     "capture.check",
   );
+  dependencies.signal?.throwIfAborted();
   const existing = checked.existing;
   if (existing && typeof existing === "object" && dependencies.duplicateAction === undefined) {
     return duplicate(existing as Record<string, unknown>);
@@ -493,6 +525,7 @@ export async function submitArticleCapture(
         : undefined
     : undefined;
   const recoverableHtml = await dependencies.finalize(capture.html, {});
+  dependencies.signal?.throwIfAborted();
   const beginRequest: NativeRequestMessage = {
     op: "capture.begin",
     title: capture.title,
@@ -511,9 +544,11 @@ export async function submitArticleCapture(
   const captureId = safeId(begun.captureId, "capture ID");
 
   try {
-    const { assetIds, assetsByKey, missing } = await importCaptureAssets(capture.images, dependencies);
+    dependencies.signal?.throwIfAborted();
+    const { assetIds, assetsByKey, missing } = await importCaptureAssets(capture.images, captureId, dependencies);
 
     const html = await dependencies.finalize(capture.html, assetsByKey);
+    dependencies.signal?.throwIfAborted();
     const clip = record(
       await dependencies.native({
         op: "capture.finish",

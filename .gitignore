@@ -1,0 +1,7 @@
+/build/
+/backend/target/
+/node_modules/
+/extension/dist/
+/extension/manifest.json
+__pycache__/
+*.pyc

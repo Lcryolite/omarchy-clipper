@@ -6,6 +6,9 @@
   "type": "module",
   "scripts": {
     "build:extension": "esbuild extension/src/background.ts extension/src/content.ts extension/src/popup.ts --bundle --format=iife --platform=browser --target=chrome120 --outdir=extension/dist && cp extension/manifest.json.in extension/manifest.json",
+    "test:browser": "node tests/browser/run-tests.mjs",
+    "test:browser:chromium": "node --test tests/browser/capture-security.chromium.test.mjs",
+    "test:browser:packaged-security": "node tests/browser/packaged-security-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -15,7 +18,10 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.0.322",
+    "@types/node": "^26.6.5",
     "esbuild": "^0.25.4",
+    "playwright-core": "1.58.2",
+    "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
 }

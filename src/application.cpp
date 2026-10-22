@@ -5,18 +5,12 @@
 #include <QBuffer>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QMimeDatabase>
-#include <QProcess>
-#include <QProcessEnvironment>
 #include <QQuickWebEngineProfile>
 #include <QTextDocument>
-#include <QTemporaryDir>
 #include <QUrl>
 #include <QWebEngineUrlRequestInfo>
 #include <QWebEngineUrlRequestInterceptor>
@@ -25,32 +19,7 @@
 #include <QWebEngineUrlSchemeHandler>
 
 namespace {
-QJsonObject success(const QJsonValue &value) { return {{"ok", true}, {"result", value}}; }
 QJsonObject failure(const QString &message) { return {{"ok", false}, {"error", message}}; }
-
-bool webUrl(const QString &text) {
-    const QUrl url(text);
-    return url.isValid() && !url.host().isEmpty() && url.userInfo().isEmpty()
-        && (url.scheme() == "https" || url.scheme() == "http");
-}
-
-QByteArray runProcess(const QString &program, const QStringList &args, const QByteArray &input = {}, int timeout = 10000,
-                      const QProcessEnvironment &environment = QProcessEnvironment::systemEnvironment()) {
-    QProcess process;
-    process.setProcessEnvironment(environment);
-    process.start(program, args);
-    if (!process.waitForStarted(3000)) throw QString("Could not start %1").arg(program);
-    if (!input.isEmpty()) process.write(input);
-    process.closeWriteChannel();
-    if (!process.waitForFinished(timeout)) {
-        process.kill();
-        process.waitForFinished();
-        throw QString("%1 timed out").arg(program);
-    }
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
-        throw QString("%1 was cancelled or failed").arg(program);
-    return process.readAllStandardOutput();
-}
 
 class LocalRequests final : public QWebEngineUrlRequestInterceptor {
 public:
@@ -77,10 +46,10 @@ public:
         const QString id = url.path().mid(1);
         QByteArray body, mime;
         if (url.host() == "asset") {
-            QFile file(app.collection().assetPath(id));
-            if (!file.open(QIODevice::ReadOnly)) { job->fail(QWebEngineUrlRequestJob::UrlNotFound); return; }
-            body = file.readAll();
-            mime = QMimeDatabase().mimeTypeForData(body).name().toUtf8();
+            QString assetMime;
+            body = app.readAsset(id, &assetMime);
+            mime = assetMime.toUtf8();
+            if (body.isEmpty()) { job->fail(QWebEngineUrlRequestJob::UrlNotFound); return; }
             if (!mime.startsWith("image/")) { job->fail(QWebEngineUrlRequestJob::RequestDenied); return; }
         } else if (url.host() == "clip") {
             const auto response = app.dispatch({{"op", "clip.get"}, {"id", id}});
@@ -166,8 +135,12 @@ private:
 };
 }
 
-Application::Application(QString root, QString clipId, QObject *parent)
-    : QObject(parent), m_root(std::move(root)), m_clipId(std::move(clipId)), m_language(this), m_collection(m_root)
+Application::Application(QString root, QString clipId, QObject *parent, QString backend)
+    : QObject(parent)
+    , m_root(std::move(root))
+    , m_clipId(std::move(clipId))
+    , m_language(this)
+    , m_runtime(m_root, std::move(backend))
 {
     connect(&m_language, &LanguageSettings::languageChanged,
             this, &Application::languageChanged);
@@ -178,104 +151,21 @@ QString Application::readerUrl(const QString &id) const {
     return "clipper://clip/" + QString::fromUtf8(QUrl::toPercentEncoding(id)) + "?t=" + QString::number(QDateTime::currentMSecsSinceEpoch());
 }
 
-QJsonObject Application::dispatch(const QJsonObject &value, bool native) {
-    const QString op = value.value("op").toString();
-    if (native && !nativeOperationAllowed(value))
-        return failure("Operation is not available to browser clients");
+QJsonObject Application::dispatch(const QJsonObject &value) {
     try {
-        if (op == "settings.get") {
-            if (!m_language.error().isEmpty()) return failure(m_language.error());
-            return success(QJsonObject{{"language", language()},
-                                       {"resolvedLanguage", resolvedLanguage()}});
-        }
-        if (op == "theme.get") return success(currentTheme());
-        if (op == "link.open") {
-            const auto url = value.value("url").toString();
-            if (!webUrl(url)) return failure("Only web links can be opened");
-            return QDesktopServices::openUrl(QUrl(url)) ? success(true) : failure("Could not open the source browser");
-        }
-        if (op == "clip.open") {
-            auto found = m_collection.dispatch({{"op", "clip.get"}, {"id", value.value("id")}});
-            if (!found.value("ok").toBool()) return found;
-            QProcess reader;
-            const bool mixed = found.value("result").toObject().value("kind").toString() == "mixed";
-            reader.setProgram(mixed
-                ? QCoreApplication::applicationDirPath() + "/clipper-native"
-                : QCoreApplication::applicationFilePath());
-            QStringList arguments{"--data-dir", m_root, "--open", value.value("id").toString()};
-            if (!mixed) arguments << "--web-reader";
-            reader.setArguments(arguments);
-            reader.setStandardOutputFile(QProcess::nullDevice());
-            reader.setStandardErrorFile(QProcess::nullDevice());
-            const bool launched = reader.startDetached();
-            return launched ? success(true) : failure("Could not open the detail window");
-        }
-        if (op == "file.import" || op == "clipboard.import" || op == "capture.region") {
-            QByteArray bytes;
-            QString name = "Image";
-            if (op == "file.import") {
-                QString path = value.value("path").toString();
-                if (path.startsWith("file:")) path = QUrl(path).toLocalFile();
-                QFile file(path);
-                if (!file.open(QIODevice::ReadOnly) || file.size() > 12 * 1024 * 1024) return failure("Image could not be read or exceeds 12 MiB");
-                bytes = file.readAll(); name = QFileInfo(path).fileName();
-            } else if (op == "capture.region") {
-                if (native && !webUrl(value.value("sourceUrl").toString())) return failure("A source URL is required");
-                QTemporaryDir captureDirectory;
-                if (!captureDirectory.isValid()) return failure("Could not create a screenshot directory");
-                auto environment = QProcessEnvironment::systemEnvironment();
-                environment.insert("OMASNAP_SCREENSHOT_DIR", captureDirectory.path());
-                runProcess("omarchy", {"capture", "screenshot", "region", "save"}, {}, 180000, environment);
-                // Omasnap also exits successfully on cancellation or overlay dismissal.
-                const auto files = QDir(captureDirectory.path()).entryList(QDir::Files);
-                if (files.size() != 1) return failure("Screenshot was cancelled or produced no image");
-                QFile file(captureDirectory.filePath(files.first()));
-                if (!file.open(QIODevice::ReadOnly) || file.size() > 12 * 1024 * 1024)
-                    return failure("Screenshot could not be read or exceeds 12 MiB");
-                bytes = file.readAll();
-            } else {
-                QString clipboardType = "image/png";
-                if (op == "clipboard.import") {
-                    const auto types = QString::fromUtf8(runProcess("wl-paste", {"--list-types"})).split('\n');
-                    clipboardType.clear();
-                    for (const auto &candidate : {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/avif"}) {
-                        if (types.contains(QString::fromLatin1(candidate))) { clipboardType = candidate; break; }
-                    }
-                    if (clipboardType.isEmpty()) return failure("Clipboard does not contain a supported image");
-                }
-                bytes = runProcess("wl-paste", {"--no-newline", "--type", clipboardType});
-            }
-            const auto mime = QMimeDatabase().mimeTypeForData(bytes).name();
-            auto imported = m_collection.dispatch({{"op", "asset.import"}, {"data", QString::fromLatin1(bytes.toBase64())}, {"mime", mime}, {"name", name}});
-            if (!imported.value("ok").toBool() || !native || op != "capture.region") return imported;
-            return m_collection.dispatch({{"op", "capture.mixed"}, {"text", ""}, {"assetIds", QJsonArray{imported.value("result").toObject().value("id")}}, {"sourceUrl", value.value("sourceUrl")}, {"title", value.value("title")}, {"scope", "region"}});
-        }
-        if (op == "clipboard.copy") {
-            auto found = m_collection.dispatch({{"op", "clip.get"}, {"id", value.value("id")}});
-            if (!found.value("ok").toBool()) return found;
-            const auto clip = found.value("result").toObject();
-            const QString assetId = value.value("assetId").toString();
-            if (assetId.isEmpty()) runProcess("wl-copy", {"--type", "text/plain;charset=utf-8"}, clip.value("text").toString().toUtf8());
-            else {
-                bool owned = false;
-                for (const auto &asset : clip.value("assets").toArray()) if (asset.toObject().value("id").toString() == assetId) owned = true;
-                if (!owned) return failure("Image does not belong to this clip");
-                QFile file(m_collection.assetPath(assetId));
-                if (!file.open(QIODevice::ReadOnly)) return failure("Image is missing");
-                const auto bytes = file.readAll();
-                runProcess("wl-copy", {"--type", QMimeDatabase().mimeTypeForData(bytes).name()}, bytes);
-            }
-            return success(true);
-        }
-        return m_collection.dispatch(value);
+        return m_runtime.dispatch(value);
     } catch (const QString &error) { return failure(error); }
     catch (const std::exception &) { return failure("The operation could not be completed"); }
 }
 
-bool Application::nativeOperationAllowed(const QJsonObject &value)
+QString nativeDetailExecutable()
 {
-    static const QSet<QString> nativeOps{"capture.check", "capture.begin", "capture.finish", "capture.abort", "capture.pending", "capture.mixed", "capture.region", "asset.import", "clip.open", "clip.restore", "settings.get"};
-    return nativeOps.contains(value.value("op").toString());
+    const QDir applicationDir(QCoreApplication::applicationDirPath());
+    const QString sibling = applicationDir.absoluteFilePath("clipper-native");
+    if (QFileInfo::exists(sibling))
+        return sibling;
+    const QString installed = applicationDir.absoluteFilePath("../../bin/clipper-native");
+    return QFileInfo::exists(installed) ? installed : sibling;
 }
 
 void registerReaderScheme() {
