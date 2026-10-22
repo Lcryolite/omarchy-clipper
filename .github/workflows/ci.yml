@@ -45,7 +45,18 @@ jobs:
       - run: make -j2 all
       - run: npm ci --ignore-scripts
       - run: npm run build:extension
-      - run: CLIPPER_RUST_BIN="$PWD/backend/target/release/omarchy-clipper-backend" python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Test as an unprivileged desktop user
+        run: |
+          useradd --create-home clipper-test
+          runuser -u clipper-test -- env \
+            CLIPPER_RUST_BIN="$PWD/backend/target/release/omarchy-clipper-backend" \
+            python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Test foreign-owned storage rejection
+        run: |
+          CLIPPER_RUST_BIN="$PWD/backend/target/release/omarchy-clipper-backend" \
+            python3 -m unittest -v \
+            tests.test_storage_security.StorageSecurityTests.test_foreign_owned_database_is_rejected_without_mutation \
+            tests.test_rust_storage_security.RustStorageSecurityTests.test_foreign_owned_database_is_rejected_without_mutation
       - run: npm run test:browser:chromium
       - name: Capture through the Rust native host
         run: |
